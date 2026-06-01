@@ -20,7 +20,7 @@ import java.util.Set;
  * ContextPolicy.builder()
  *     .tokenThreshold(30000)
  *     .keepRecentTools(5)
- *     .protectedTools("my_protected_tool")  // SkillsTool 已内置保护，无需手动添加
+ *     .protectedTools("my_protected_tool")  // SkillsTool、TodoWrite 已内置保护，无需手动添加
  *     .build()
  * }</pre>
  *
@@ -29,7 +29,7 @@ import java.util.Set;
  * @param maxToolLength   ToolResponse 内容和 ToolCall 参数的统一压缩阈值（字符），
  *                        超过时替换为占位符，默认 200。设为 0 不截断
  * @param protectedTools  受保护的工具名称集合（不包含内置保护工具）。
- *                        内置保护工具（SkillsTool）会自动加入，无需手动配置。
+ *                        内置保护工具（SkillsTool、TodoWrite）会自动加入，无需手动配置。
  *                        这些工具的响应和参数不会被压缩。
  * @author bigchui
  * 
@@ -47,8 +47,8 @@ public record ContextPolicy(
     public static final int DEFAULT_KEEP_RECENT_TOOLS = 4;
     /** 默认工具内容压缩阈值（ToolResponse 和 ToolCall args 统一使用） */
     public static final int DEFAULT_MAX_TOOL_LENGTH = 200;
-    /** 内置保护工具：SkillsTool */
-    private static final Set<String> BUILTIN_PROTECTED_TOOLS = Set.of("Skill");
+    /** 内置保护工具：SkillsTool、TodoWrite */
+    private static final Set<String> BUILTIN_PROTECTED_TOOLS = Set.of("Skill", "TodoWrite");
 
     public ContextPolicy {
         // 合并用户配置的保护工具 + 内置保护工具
@@ -139,7 +139,7 @@ public record ContextPolicy(
          * 受保护的工具名称集合。
          * <p>
          * 这些工具的 ToolResponse 和 ToolCall 参数不会被 micro_compact 替换。
-         * SkillsTool 已内置保护，无需手动添加。
+         * SkillsTool、TodoWrite 已内置保护，无需手动添加。
          *
          * @param tools 工具名称
          * @return Builder

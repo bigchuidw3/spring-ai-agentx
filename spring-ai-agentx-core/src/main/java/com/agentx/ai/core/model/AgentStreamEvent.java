@@ -1,6 +1,9 @@
 package com.agentx.ai.core.model;
 
 import com.agentx.ai.core.exception.AgentErrorCode;
+import com.agentx.ai.core.tools.TodoWriteTool.TodoItem;
+
+import java.util.List;
 
 /**
  * Agent 流式事件。
@@ -12,6 +15,7 @@ import com.agentx.ai.core.exception.AgentErrorCode;
  *   <li>{@link Text} - LLM 正常文本输出</li>
  *   <li>{@link ToolStart} - 工具即将执行</li>
  *   <li>{@link ToolEnd} - 工具执行完成</li>
+ *   <li>{@link TodoProgress} - 任务列表进度更新（TodoWrite 工具触发）</li>
  *   <li>{@link Paused} - 执行暂停，等待外部输入</li>
  *   <li>{@link StageOutput} - 自定义阶段输出（由 {@link StageOutputProvider} 产生）</li>
  *   <li>{@link Error} - LLM 调用异常（重试时发出）</li>
@@ -19,7 +23,7 @@ import com.agentx.ai.core.exception.AgentErrorCode;
  * </ul>
  *
  * @author bigchui
- * 
+ *
  */
 public sealed interface AgentStreamEvent permits
         AgentStreamEvent.AgentStart,
@@ -27,6 +31,7 @@ public sealed interface AgentStreamEvent permits
         AgentStreamEvent.Text,
         AgentStreamEvent.ToolStart,
         AgentStreamEvent.ToolEnd,
+        AgentStreamEvent.TodoProgress,
         AgentStreamEvent.Paused,
         AgentStreamEvent.StageOutput,
         AgentStreamEvent.Error,
@@ -72,6 +77,17 @@ public sealed interface AgentStreamEvent permits
      * @param result    工具返回结果
      */
     record ToolEnd(String toolName, String toolCallId, String result) implements AgentStreamEvent {
+    }
+
+    /**
+     * 任务列表进度更新（TodoWrite 工具触发）。
+     * <p>
+     * 每次 LLM 调用 TodoWrite 更新任务列表时，框架自动发射此事件。
+     * 前端可据此实时渲染任务进度面板。
+     *
+     * @param items 当前所有任务项
+     */
+    record TodoProgress(List<TodoItem> items) implements AgentStreamEvent {
     }
 
     /**

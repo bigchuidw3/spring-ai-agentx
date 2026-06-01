@@ -40,15 +40,18 @@ public class LoopMessageBuilder {
     private final MemoryInjector memoryInjector;
     private final ThinkingMode thinkingMode;
     private final DeferredToolRegistry deferredToolRegistry;
+    private final boolean todoWriteEnabled;
 
     public LoopMessageBuilder(String instructions, ChatMemory chatMemory,
                               MemoryInjector memoryInjector, ThinkingMode thinkingMode,
-                              DeferredToolRegistry deferredToolRegistry) {
+                              DeferredToolRegistry deferredToolRegistry,
+                              boolean todoWriteEnabled) {
         this.instructions = instructions;
         this.chatMemory = chatMemory;
         this.memoryInjector = memoryInjector;
         this.thinkingMode = thinkingMode;
         this.deferredToolRegistry = deferredToolRegistry;
+        this.todoWriteEnabled = todoWriteEnabled;
     }
 
     /**
@@ -74,6 +77,10 @@ public class LoopMessageBuilder {
 
         if (deferredToolRegistry != null) {
             systemPrompt = appendSection(systemPrompt, PromptConstants.TOOL_SEARCH_GUIDANCE);
+        }
+
+        if (todoWriteEnabled) {
+            systemPrompt = appendSection(systemPrompt, PromptConstants.TODO_WRITE_GUIDANCE);
         }
 
         if (!systemPrompt.isEmpty()) {

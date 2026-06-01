@@ -292,6 +292,17 @@ public final class TestConfig {
                     + (te.result() != null && te.result().length() > 80
                     ? te.result().substring(0, 80) + "..."
                     : te.result()));
+            case AgentStreamEvent.TodoProgress tp -> {
+                System.out.println("[TodoProgress] 任务列表更新:");
+                for (var item : tp.items()) {
+                    String icon = switch (item.status()) {
+                        case completed -> "[✓]";
+                        case in_progress -> "[→]";
+                        case pending -> "[ ]";
+                    };
+                    System.out.println("  " + icon + " " + item.content());
+                }
+            }
             case AgentStreamEvent.StageOutput so ->
                     System.out.println("\n[StageOutput:" + so.stage() + "] " + so.data());
             case AgentStreamEvent.Error e ->

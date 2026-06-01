@@ -69,7 +69,7 @@ public class AgentLoopExecutor {
     private final ThinkingMode thinkingMode;
     private final ThinkingModeProcessor thinkingModeProcessor;
     private final ToolCallExecutor toolCallExecutor;
-    private final com.agentx.ai.core.agent.internal.LlmInvoker llmInvoker;
+    private final LlmInvoker llmInvoker;
     private final ContextCompactor contextCompactor;
 
     private AgentLoopExecutor(Builder builder) {
@@ -120,9 +120,11 @@ public class AgentLoopExecutor {
                 builder.semanticMemoryManager, builder.profileMemoryEnabled);
 
         // 消息构建器
+        boolean hasTodoWrite = map.containsKey("TodoWrite");
         this.messageBuilder = new LoopMessageBuilder(
                 builder.instructions, builder.chatMemory,
-                memoryInjector, builder.thinkingMode, builder.deferredToolRegistry);
+                memoryInjector, builder.thinkingMode, builder.deferredToolRegistry,
+                hasTodoWrite);
 
         // 工具调用执行器
         this.toolCallExecutor = new ToolCallExecutor(toolMap, new ObjectMapper(),
@@ -366,10 +368,21 @@ public class AgentLoopExecutor {
             List<AssistantMessage.ToolCall> toolCalls = response.getResult().getOutput().getToolCalls();
 
             if (toolCalls != null && !toolCalls.isEmpty()) {
-                // 直接使用原始 AssistantMessage（可能是 DeepSeekAssistantMessage 等子类型）
-                // reasoningContent 等模型特定字段保留在子类型中，不做包装转换
-                // text 为 null 的场景由各 ChatModel 实现自行兼容
-                messages.add(response.getResult().getOutput());
+                // 校验并修复不合法的 tool call arguments，防止后续 API 调用 400
+                List<AssistantMessage.ToolCall> rawCalls = toolCalls;
+                toolCalls = toolCallExecutor.sanitizeToolCalls(rawCalls);
+
+                if (toolCalls == rawCalls) {
+                    // 全部合法，直接使用原始 AssistantMessage（保留子类型如 DeepSeekAssistantMessage）
+                    messages.add(response.getResult().getOutput());
+                } else {
+                    // arguments 被修复过，构建新的 AssistantMessage
+                    AssistantMessage original = response.getResult().getOutput();
+                    messages.add(AssistantMessage.builder()
+                            .content(original.getText())
+                            .toolCalls(toolCalls)
+                            .build());
+                }
 
                 // === 暂停检查 (PauseAdvisor 通过 context 标记) ===
                 if (Boolean.TRUE.equals(ccResponse.context().get(PauseAdvisor.PAUSE_REQUIRED))) {
@@ -708,11 +721,14 @@ public class AgentLoopExecutor {
             return;
         }
 
+        // 校验并修复不合法的 tool call arguments，防止后续 API 调用 400
+        List<AssistantMessage.ToolCall> safeToolCalls = toolCallExecutor.sanitizeToolCalls(state.toolCalls);
+
         // tool call 路径：构建 AssistantMessage 时携带 reasoningContent（通过 properties 传递）
         Map<String, Object> props = thinkingModeProcessor.buildReasoningProperties(state);
         AssistantMessage assistantMsg = AssistantMessage.builder()
                 .content(state.textBuffer.isEmpty() ? "" : state.textBuffer.toString())
-                .toolCalls(state.toolCalls)
+                .toolCalls(safeToolCalls)
                 .properties(props)
                 .build();
         messages.add(assistantMsg);
@@ -726,7 +742,7 @@ public class AgentLoopExecutor {
         // === 流式暂停检查 ===
         // 流式路径中，PauseAdvisor 不会在 context 中标记（streaming advisor 不同）
         // 直接检查 PauseAdvisor 是否配置了拦截
-        PauseCheckResult pauseCheck = checkStreamPause(state.toolCalls, messages, params,
+        PauseCheckResult pauseCheck = checkStreamPause(safeToolCalls, messages, params,
                 (int) roundCounter.get(), query);
         if (pauseCheck.isPaused()) {
             sink.tryEmitNext(new AgentStreamEvent.Paused(pauseCheck.state()));
@@ -736,11 +752,11 @@ public class AgentLoopExecutor {
         }
 
         // 发射 ToolStart 事件
-        for (AssistantMessage.ToolCall tc : state.toolCalls) {
+        for (AssistantMessage.ToolCall tc : safeToolCalls) {
             sink.tryEmitNext(new AgentStreamEvent.ToolStart(tc.name(), tc.id(), tc.arguments()));
         }
 
-        toolCallExecutor.executeToolCallsAsync(sink, state.toolCalls, messages, params, execCtx, () -> {
+        toolCallExecutor.executeToolCallsAsync(sink, safeToolCalls, messages, params, execCtx, () -> {
             scheduleRound(messages, sink, roundCounter, params, execCtx, query);
         });
     }

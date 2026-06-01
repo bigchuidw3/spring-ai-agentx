@@ -50,6 +50,7 @@ Spring AI AgentX 是一款面向 Java 开发者的 AI Agent 开发框架。基�
 | 上下文压缩 | 两层自动压缩策略（micro_compact + auto_compact），控制长对话 Token 消耗 |
 | ToolSearch 工具检索 | 工具按需发现，LLM 通过 tool_search 元工具搜索加载 deferred 工具 |
 | 结构化输出 | 非流式调用输出标准 JSON，支持单对象和泛型集合 |
+| TodoWrite 任务追踪 | 结构化任务列表工具，流式 TodoProgress 进度事件，保证多步骤任务不遗漏 |
 
 ## 快速开始
 
@@ -225,6 +226,7 @@ String answer = agent.call("帮我设计一个订单系统的架构");
 | 13 | 结构化输出 | 非流式调用输出标准 JSON，支持单对象和泛型集合 | [13-结构化输出](docs/core/13-结构化输出.md) |
 | 14 | 综合示例 | Skills + HITL + 分阶段输出完整示例 | [14-综合示例](docs/core/14-综合示例.md) |
 | 15 | DeepSeek-V4 兼容 | reasoning_content 回传兼容性修复与使用指南 | [15-DeepSeek-V4兼容](docs/core/15-DeepSeek-V4兼容.md) |
+| 16 | TodoWrite 任务追踪 | 结构化任务列表，多步骤任务进度可视化 | [16-TodoWrite任务追踪](docs/core/16-TodoWrite任务追踪.md) |
 
 ---
 
@@ -261,6 +263,7 @@ cp secrets.properties.example secrets.properties
 | `FullIntegrationTest` | 完整集成 | 三层记忆 + Skills + 全量工具 |
 | `ToolSearchTest` | ToolSearch 工具检索 | 同步/流式调用、Session 隔离验证 |
 | `StructuredOutputTest` | 结构化输出 | call/callForResult 单对象与集合输出 |
+| `TodoWriteTest` | TodoWrite 任务追踪 | 流式/非流式 TodoProgress 事件，纯 TodoWrite 场景 |
 
 > 各示例内部通过 `testNumber` 切换测试场景，修改后直接运行 `main` 方法即可。
 
@@ -292,10 +295,10 @@ cp secrets.properties.example secrets.properties
 - [x] 上下文压缩 — 两层自动压缩策略，控制 Token 消耗
 - [x] ToolSearch 工具检索 — 工具按需发现，keyword + LLM 双模式搜索
 - [x] 结构化输出 — 非流式调用输出标准 JSON，支持单对象和泛型集合
+- [x] TodoWrite 任务追踪 — 结构化任务列表工具，流式 TodoProgress 进度事件
 
 ### v1.0.0-M2（规划中）
 
-- [ ] todowrite — 复杂的多步骤任务，保证智能体不会遗漏任何步骤
 - [ ] SubAgent 机制（Agent Tools） — 将 Agent 封装为另一个 Agent 的工具
 - [ ] 后置任务校验机制 — 任务完成后引入模型校验或规则校验
 

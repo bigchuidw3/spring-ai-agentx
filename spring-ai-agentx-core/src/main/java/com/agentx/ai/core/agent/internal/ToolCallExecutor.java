@@ -6,6 +6,8 @@ import com.agentx.ai.core.model.PendingToolCall;
 import com.agentx.ai.core.model.RunnableParams;
 import com.agentx.ai.core.stage.AgentExecutionContext;
 import com.agentx.ai.core.stage.StageOutputManager;
+import com.agentx.ai.core.tools.TodoWriteTool;
+import com.alibaba.fastjson2.JSON;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -166,6 +168,10 @@ public class ToolCallExecutor {
                             if (detail.error == null) {
                                 sink.tryEmitNext(new AgentStreamEvent.ToolEnd(
                                         detail.toolCall.name(), detail.toolCall.id(), detail.rawResult));
+
+                                // TodoWrite 进度事件
+                                emitTodoProgressIfNeeded(detail.toolCall.name(), detail.toolCall.arguments(), sink);
+
                                 if (execCtx != null) {
                                     execCtx.addToolRecord(detail.toolCall.name(), detail.toolCall.id(),
                                             detail.toolCall.arguments(), detail.rawResult);
@@ -325,6 +331,58 @@ public class ToolCallExecutor {
             return false;
         }
         return APPROVAL_KEYWORDS.contains(userResponse.trim().toLowerCase());
+    }
+
+    private void emitTodoProgressIfNeeded(String toolName, String arguments, Sinks.Many<AgentStreamEvent> sink) {
+        if (!"TodoWrite".equals(toolName)) {
+            return;
+        }
+        try {
+            List<TodoWriteTool.TodoItem> items = JSON.parseObject(arguments).getList("todos", TodoWriteTool.TodoItem.class);
+            sink.tryEmitNext(new AgentStreamEvent.TodoProgress(items));
+        } catch (Exception e) {
+            log.warn("解析 TodoWrite 参数失败，跳过 TodoProgress 事件: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 校验并修复工具调用参数。
+     * 如果某个 tool call 的 arguments 不是合法 JSON，替换为 {@code {}}，避免后续 API 调用 400。
+     * 全部合法时原样返回传入列表。
+     */
+    public List<AssistantMessage.ToolCall> sanitizeToolCalls(List<AssistantMessage.ToolCall> toolCalls) {
+        boolean needsFix = false;
+        for (AssistantMessage.ToolCall tc : toolCalls) {
+            String args = tc.arguments();
+            if (args != null && !args.isBlank() && !isValidJson(args)) {
+                needsFix = true;
+                break;
+            }
+        }
+        if (!needsFix) {
+            return toolCalls;
+        }
+
+        List<AssistantMessage.ToolCall> fixed = new ArrayList<>(toolCalls.size());
+        for (AssistantMessage.ToolCall tc : toolCalls) {
+            String args = tc.arguments();
+            if (args == null || args.isBlank() || isValidJson(args)) {
+                fixed.add(tc);
+            } else {
+                log.warn("工具 '{}' 的 arguments 不是合法 JSON，已替换为空对象: {}", tc.name(), args);
+                fixed.add(new AssistantMessage.ToolCall(tc.id(), tc.type(), tc.name(), "{}"));
+            }
+        }
+        return fixed;
+    }
+
+    private boolean isValidJson(String json) {
+        try {
+            JSON.parse(json);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     private void collectAfterToolEnd(AgentExecutionContext execCtx, Map<String, Object> stageOutputs) {
