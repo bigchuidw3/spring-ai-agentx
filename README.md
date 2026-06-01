@@ -2,7 +2,7 @@
 
 基于原生 Spring AI 的智能体（Agent）开发框架，提供 ReAct 执行引擎、分层记忆、工具调度、Human-in-the-Loop 等核心能力，形成完整的 Harness Engineering 方案，帮助开发者快速构建 AI Agent，可以快速搭建 Java 版的 Claude Code。
 
-> 当前版本：1.0.0-M1 | JDK 21+ | Spring Boot 3.5.x | Spring AI 1.1.0
+> 当前版本：1.0.0-M2 | JDK 21+ | Spring Boot 3.5.x | Spring AI 1.1.0
 
 ## Spring AI AgentX 是什么
 
@@ -30,7 +30,13 @@ Spring AI AgentX 是一款面向 Java 开发者的 AI Agent 开发框架。基�
 
 ## 功能概览
 
-### v1.0.0-M1（当前版本）
+### v1.0.0-M2（当前版本）
+
+| 功能 | 说明 |
+|------|------|
+| TodoWrite 任务追踪 | 结构化任务列表工具，流式 TodoProgress 进度事件，保证多步骤任务不遗漏 |
+
+### v1.0.0-M1
 
 | 功能 | 说明 |
 |------|------|
@@ -50,7 +56,6 @@ Spring AI AgentX 是一款面向 Java 开发者的 AI Agent 开发框架。基�
 | 上下文压缩 | 两层自动压缩策略（micro_compact + auto_compact），控制长对话 Token 消耗 |
 | ToolSearch 工具检索 | 工具按需发现，LLM 通过 tool_search 元工具搜索加载 deferred 工具 |
 | 结构化输出 | 非流式调用输出标准 JSON，支持单对象和泛型集合 |
-| TodoWrite 任务追踪 | 结构化任务列表工具，流式 TodoProgress 进度事件，保证多步骤任务不遗漏 |
 
 ## 快速开始
 
@@ -74,7 +79,7 @@ mvn clean install -DskipTests
 <dependency>
     <groupId>com.agentx.ai</groupId>
     <artifactId>spring-ai-agentx-core</artifactId>
-    <version>1.0.0-M1</version>
+    <version>1.0.0-M2</version>
 </dependency>
 ```
 
@@ -273,11 +278,12 @@ cp secrets.properties.example secrets.properties
 
 | 版本 | 状态 | 说明 |
 |------|------|------|
-| [v1.0.0-M1](#v100-m1当前版本) | 当前版本 | 首个里程碑版本，ReAct 引擎 + 分层记忆 + 工具调度 + 思考模型适配 + DeepSeek-V4 兼容等核心能力 |
+| [v1.0.0-M2](#v100-m2当前版本) | 当前版本 | TodoWrite 任务追踪，结构化任务列表工具与流式进度事件 |
+| [v1.0.0-M1](#v100-m1) | 历史版本 | 首个里程碑版本，ReAct 引擎 + 分层记忆 + 工具调度 + 思考模型适配 + DeepSeek-V4 兼容等核心能力 |
 
 ## 版本路线图
 
-### v1.0.0-M1（当前版本）
+### v1.0.0-M1
 
 - [x] ReAct Agent 引擎 — 基于 Reasoning + Acting 范式的多轮执行闭环
 - [x] 同步调用与流式输出 — call / stream 双模式，流式基于 Reactor Flux
@@ -295,10 +301,10 @@ cp secrets.properties.example secrets.properties
 - [x] 上下文压缩 — 两层自动压缩策略，控制 Token 消耗
 - [x] ToolSearch 工具检索 — 工具按需发现，keyword + LLM 双模式搜索
 - [x] 结构化输出 — 非流式调用输出标准 JSON，支持单对象和泛型集合
+
+### v1.0.0-M2（当前版本）
+
 - [x] TodoWrite 任务追踪 — 结构化任务列表工具，流式 TodoProgress 进度事件
-
-### v1.0.0-M2（规划中）
-
 - [ ] SubAgent 机制（Agent Tools） — 将 Agent 封装为另一个 Agent 的工具
 - [ ] 后置任务校验机制 — 任务完成后引入模型校验或规则校验
 
