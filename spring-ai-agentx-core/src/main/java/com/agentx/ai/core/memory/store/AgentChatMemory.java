@@ -23,7 +23,7 @@ import java.util.List;
  * 与 {@link JdbcMemoryStore}（{@code agentx_memory} 表）共同构成 DataSource 模式的完整存储方案。
  *
  * 表结构：
- * CREATE TABLE IF NOT EXISTS agentx_session (
+ * CREATE TABLE agentx_session (
  *     id              BIGINT       NOT NULL,
  *     conversation_id VARCHAR(100) NOT NULL,
  *     user_id         VARCHAR(100) DEFAULT NULL,
@@ -41,12 +41,8 @@ public class AgentChatMemory implements ChatMemory {
 
     private static final Logger log = LoggerFactory.getLogger(AgentChatMemory.class);
 
-    private static final String CHECK_TABLE_SQL = """
-            SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'agentx_session'
-            """;
-
     private static final String CREATE_TABLE_SQL = """
-            CREATE TABLE IF NOT EXISTS agentx_session (
+            CREATE TABLE agentx_session (
                 id              BIGINT       NOT NULL,
                 conversation_id VARCHAR(100) NOT NULL,
                 user_id         VARCHAR(100) DEFAULT NULL,
@@ -57,6 +53,17 @@ public class AgentChatMemory implements ChatMemory {
                 PRIMARY KEY (id)
             )
             """;
+
+    private static final String[] COMMENT_SQLS = {
+            "COMMENT ON TABLE agentx_session IS 'AgentX会话记录表'",
+            "COMMENT ON COLUMN agentx_session.id IS '主键ID'",
+            "COMMENT ON COLUMN agentx_session.conversation_id IS '会话ID'",
+            "COMMENT ON COLUMN agentx_session.user_id IS '用户ID'",
+            "COMMENT ON COLUMN agentx_session.question IS '用户提问'",
+            "COMMENT ON COLUMN agentx_session.answer IS 'Agent回答'",
+            "COMMENT ON COLUMN agentx_session.think IS '模型思考内容'",
+            "COMMENT ON COLUMN agentx_session.created_at IS '创建时间'"
+    };
 
     private static final String CREATE_INDEX_SQL = """
             CREATE INDEX idx_agentx_session_conv ON agentx_session (conversation_id)
@@ -99,14 +106,26 @@ public class AgentChatMemory implements ChatMemory {
         if (!initialized) {
             synchronized (this) {
                 if (!initialized) {
-                    Integer count = jdbcTemplate.queryForObject(CHECK_TABLE_SQL, Integer.class);
-                    if (count == null || count == 0) {
+                    try {
                         jdbcTemplate.execute(CREATE_TABLE_SQL);
+                        for (String commentSql : COMMENT_SQLS) {
+                            try {
+                                jdbcTemplate.execute(commentSql);
+                            } catch (Exception e) {
+                                log.debug("Comment skipped: {}", e.getMessage());
+                            }
+                        }
+                    } catch (Exception e) {
+                        log.debug("Table creation skipped (may already exist): {}", e.getMessage());
+                    }
+                    try {
                         jdbcTemplate.execute(CREATE_INDEX_SQL);
                         jdbcTemplate.execute(CREATE_INDEX_USER_SQL);
-                        log.info("agentx_session table created");
+                    } catch (Exception e) {
+                        log.debug("Index creation skipped: {}", e.getMessage());
                     }
                     initialized = true;
+                    log.info("agentx_session table initialized");
                 }
             }
         }

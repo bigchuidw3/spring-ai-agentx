@@ -46,7 +46,7 @@ public class MemoryTest {
         TestConfig.printTestHeader("测试 1：短期记忆（agentx_session）");
 
         DataSource dataSource = TestConfig.createMySqlDataSource();
-        ChatModel chatModel = TestConfig.createChatModel();
+        ChatModel chatModel = TestConfig.createDeepSeekV4ChatModel();
         String userId = TestConfig.randomUserId("user_st");
         String convId = TestConfig.randomConvId();
 
@@ -54,7 +54,7 @@ public class MemoryTest {
                 .chatModel(chatModel)
                 .dataSource(dataSource)
                 .thinkingMode(ThinkingMode.REASONING_CONTENT)
-                .profileMemoryEnabled(false)
+                .enableProfileMemory(false)
                 .maxRounds(5)
                 .build();
 
@@ -96,7 +96,7 @@ public class MemoryTest {
         TestConfig.printTestHeader("测试 2：短期 + 用户画像（agentx_session + agentx_memory）");
 
         DataSource dataSource = TestConfig.createMySqlDataSource();
-        ChatModel chatModel = TestConfig.createZhiPuChatModel();
+        ChatModel chatModel = TestConfig.createZhiPuOpenAiChatModel();
         String userId = TestConfig.randomUserId("user_pf");
 
         // 注册工具：文件系统 + Skills + ask_user
@@ -110,7 +110,7 @@ public class MemoryTest {
         ReactAgent agent = ReactAgent.builder()
                 .chatModel(chatModel)
                 .dataSource(dataSource)
-                .profileMemoryEnabled(false)
+                .enableProfileMemory(false)
                 .maxRounds(5)
                 .tools(allTools)
                 .thinkingMode(ThinkingMode.REASONING_CONTENT)

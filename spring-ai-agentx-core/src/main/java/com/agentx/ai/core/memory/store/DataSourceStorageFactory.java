@@ -1,5 +1,6 @@
 package com.agentx.ai.core.memory.store;
 
+import com.agentx.ai.core.trace.TraceStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.memory.ChatMemory;
@@ -35,6 +36,21 @@ public class DataSourceStorageFactory {
         chatMemory.initialize();
         log.info("Created and initialized ChatMemory (agentx_session table)");
         return chatMemory;
+    }
+
+    /**
+     * 基于 DataSource 创建 TraceStore。
+     *
+     * 自动创建 {@code agentx_trace} 表。
+     *
+     * @param dataSource 数据源
+     * @return TraceStore 实例
+     */
+    public static TraceStore createTraceStore(DataSource dataSource) {
+        TraceStore traceStore = new TraceStore(dataSource);
+        traceStore.initialize();
+        log.info("Created and initialized TraceStore (agentx_trace table)");
+        return traceStore;
     }
 
     /**

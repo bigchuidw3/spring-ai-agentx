@@ -32,7 +32,7 @@ public class ThinkingModeTest {
     public static void testMiniMaxStream() {
         TestConfig.printTestHeader("测试 1：MiniMax THINK_TAG — 流式");
 
-        ChatModel chatModel = TestConfig.createMiniMaxChatModel();
+        ChatModel chatModel = TestConfig.createChatModel();
 
         ReactAgent agent = ReactAgent.builder()
                 .chatModel(chatModel)
@@ -67,7 +67,7 @@ public class ThinkingModeTest {
     public static void testMiniMaxCall() {
         TestConfig.printTestHeader("测试 2：MiniMax THINK_TAG — 非流式");
 
-        ChatModel chatModel = TestConfig.createMiniMaxChatModel();
+        ChatModel chatModel = TestConfig.createChatModel();
 
         ReactAgent agent = ReactAgent.builder()
                 .chatModel(chatModel)

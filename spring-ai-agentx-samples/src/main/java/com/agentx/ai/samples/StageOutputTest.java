@@ -7,9 +7,11 @@ import com.agentx.ai.core.tools.BashTool;
 import com.agentx.ai.core.tools.FileSystemTools;
 import com.agentx.ai.core.tools.GrepTool;
 import com.agentx.ai.core.tools.SkillsTool;
+import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.tool.ToolCallback;
 
+import javax.sql.DataSource;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -25,7 +27,7 @@ import static com.agentx.ai.core.utils.ToolMergeUtil.mergeTools;
  *   <li>测试 3：多 Provider — AFTER_START + AFTER_TOOL_END + BEFORE_COMPLETE 组合</li>
  *   <li>测试 4：ThinkTag — 开启 think 标签解析</li>
  *   <li>测试 5：无工具场景 — 纯文本输出的 BEFORE_COMPLETE 阶段</li>
- *   <li>测试 6：Skills + Human-in-the-Loop + 流式多阶段输出</li>
+ *   <li>测试 7：Skills + Human-in-the-Loop + 流式多阶段输出</li>
  * </ul>
  *
  * @author bigchui
@@ -348,7 +350,7 @@ public class StageOutputTest {
     }
 
     /**
-     * 测试 6：Skills + Human-in-the-Loop + 流式多阶段输出。
+     * 测试 7：Skills + Human-in-the-Loop + 流式多阶段输出。
      *
      * <p>综合测试：Agent 同时具备文件工具、Skills、ask_user，
      * 流式输出包含完整事件流（AgentStart → Text → ToolStart/ToolEnd → StageOutput → Paused → Complete）。
@@ -360,10 +362,15 @@ public class StageOutputTest {
      * 4. 最终输出答案 + StageOutput（reference + recommend）
      */
     public static void testSkillsWithHitlAndStageOutput() {
-        TestConfig.printTestHeader("测试 6：Skills + Human-in-the-Loop + 流式多阶段输出");
+        TestConfig.printTestHeader("测试 7：Skills + Human-in-the-Loop + 流式多阶段输出");
 
-        ChatModel chatModel = TestConfig.createChatModel();
+        ChatModel chatModel = TestConfig.createDeepSeekV4ChatModel();
+        DataSource dataSource = TestConfig.createMySqlDataSource();
         Scanner scanner = new Scanner(System.in);
+
+        String userId = TestConfig.randomUserId("user_st");
+        String convId = TestConfig.randomConvId();
+        RunnableParams params = TestConfig.buildParams(convId, userId);
 
         // 注册工具：文件系统 + Skills + ask_user
         ToolCallback[] allTools = mergeTools(
@@ -376,6 +383,7 @@ public class StageOutputTest {
         ReactAgent agent = ReactAgent.builder()
                 .chatModel(chatModel)
                 .tools(allTools)
+                .dataSource(dataSource)
                 .askUser(true)      // 自动注册 PauseAdvisor("ask_user") + AskUserTool
                 .thinkingMode(ThinkingMode.REASONING_CONTENT)
                 .stageOutputProviders(
@@ -393,7 +401,7 @@ public class StageOutputTest {
         System.out.println("--- Events Start ---");
 
         // 首次流式调用
-        PauseState pauseState = TestConfig.collectStreamEvents(agent.streamForResult(query, RunnableParams.empty()));
+        PauseState pauseState = TestConfig.collectStreamEvents(agent.streamForResult(query, params));
         System.out.println();
 
         // 循环处理暂停（ask_user / read_file / write_file）
@@ -426,6 +434,25 @@ public class StageOutputTest {
         System.out.println("（共暂停 " + pauseRound + " 次）");
     }
 
+    public static void testDeepSeekV4ReactAgent(){
+
+        ToolCallback[] allTools = mergeTools(
+                BashTool.create(),
+                FileSystemTools.create(),
+                GrepTool.create()
+        );
+        ChatModel chatModel = TestConfig.createDeepSeekV4ChatModel();
+        ReactAgent agent = ReactAgent.builder()
+                .chatModel(chatModel)
+                .tools(allTools)
+                .thinkingMode(ThinkingMode.REASONING_CONTENT)
+                .maxRounds(50)
+                .maxRetries(3)
+                .build();
+        TestConfig.collectStreamEvents(agent.streamForResult("帮我扫描桌面有哪些文件", RunnableParams.empty()));
+        System.out.println();
+    }
+
     // ===== Main =====
 
     public static void main(String[] args) {
@@ -435,7 +462,7 @@ public class StageOutputTest {
         System.out.println("ChatModel: " + TestConfig.CHAT_MODEL);
         System.out.println("===============================================");
 
-        int testNumber = 6;
+        int testNumber = 7;
 
         switch (testNumber) {
             case 1 -> testStreamFullEvents();
@@ -443,7 +470,8 @@ public class StageOutputTest {
             case 3 -> testMultipleTimings();
             case 4 -> testThinkTagEnabled();
             case 5 -> testNoToolsWithStageOutput();
-            case 6 -> testSkillsWithHitlAndStageOutput();
+            case 7 -> testSkillsWithHitlAndStageOutput();
+            case 8 -> testDeepSeekV4ReactAgent();
             default -> System.out.println("无效的测试编号: " + testNumber);
         }
 

@@ -1,10 +1,11 @@
 package com.agentx.ai.core.agent;
 
-import com.agentx.ai.core.agent.internal.AgentLoopExecutor;
-import com.agentx.ai.core.agent.internal.AgentTaskManager;
 import com.agentx.ai.core.context.ContextCompactor;
 import com.agentx.ai.core.context.ContextPolicy;
 import com.agentx.ai.core.advisors.PauseAdvisor;
+import com.agentx.ai.core.advisors.RequestLoggingAdvisor;
+import com.agentx.ai.core.agent.internal.AgentLoopExecutor;
+import com.agentx.ai.core.agent.internal.AgentTaskManager;
 import com.agentx.ai.core.model.AgentResult;
 import com.agentx.ai.core.model.AgentStreamEvent;
 import com.agentx.ai.core.model.PauseState;
@@ -17,6 +18,8 @@ import com.agentx.ai.core.memory.store.DataSourceStorageFactory;
 import com.agentx.ai.core.memory.store.MemoryStore;
 import com.agentx.ai.core.memory.store.SemanticMemoryStore;
 import com.agentx.ai.core.tools.AskUserTool;
+import com.agentx.ai.core.trace.TraceStore;
+import com.agentx.ai.core.tools.SubAgentTool;
 import com.agentx.ai.core.utils.ToolMergeUtil;
 import com.agentx.ai.core.tools.toolsearch.DeferredToolRegistry;
 import com.agentx.ai.core.tools.toolsearch.ToolSearchConfig;
@@ -32,11 +35,11 @@ import reactor.core.publisher.Flux;
 
 import javax.sql.DataSource;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Supplier;
 
 /**
  * ReactAgent - 基于 ReAct 范式的智能体实现。
@@ -53,6 +56,8 @@ public class ReactAgent {
 
     private static final Logger log = LoggerFactory.getLogger(ReactAgent.class);
 
+    private final String name;
+    private final String description;
     private final ChatClient chatClient;
     private final ChatModel chatModel;
     private final int maxRounds;
@@ -64,15 +69,18 @@ public class ReactAgent {
     private final MemoryStore memoryStore;
     private final SemanticMemoryManager semanticMemoryManager;
     private final DataSource dataSource;
-    private final boolean profileMemoryEnabled;
+    private final boolean enableProfileMemory;
+    private boolean enableSession;
     private final List<StageOutputProvider> stageOutputProviders;
     private final ThinkingMode thinkingMode;
     private final int maxRetries;
     private final ContextPolicy contextPolicy;
     private final DeferredToolRegistry deferredToolRegistry;
+    private TraceStore traceStore;
+    private final boolean enableTrace;
 
     private ReactAgent(Builder builder, ChatMemory chatMemory, MemoryStore memoryStore,
-                       SemanticMemoryManager semanticMemoryManager) {
+                       SemanticMemoryManager semanticMemoryManager, TraceStore traceStore) {
         this.deferredToolRegistry = builder.deferredToolRegistry;
 
         // 构建 ChatClient，统一配置工具选项和 Advisors
@@ -95,6 +103,8 @@ public class ReactAgent {
         clientBuilder.defaultToolCallbacks(activeTools.toArray(new ToolCallback[0]));
 
         this.chatClient = clientBuilder.build();
+        this.name = builder.name;
+        this.description = builder.description;
         this.chatModel = builder.chatModel;
         this.maxRounds = builder.maxRounds;
         this.tools = List.copyOf(builder.tools);
@@ -105,11 +115,14 @@ public class ReactAgent {
         this.memoryStore = memoryStore;
         this.semanticMemoryManager = semanticMemoryManager;
         this.dataSource = builder.dataSource;
-        this.profileMemoryEnabled = builder.profileMemoryEnabled;
+        this.enableProfileMemory = builder.enableProfileMemory;
+        this.enableSession = builder.enableSession;
         this.stageOutputProviders = builder.stageOutputProviders;
         this.thinkingMode = builder.thinkingMode;
         this.maxRetries = builder.maxRetries;
         this.contextPolicy = builder.contextPolicy;
+        this.traceStore = traceStore;
+        this.enableTrace = builder.enableTrace;
     }
 
     /**
@@ -120,30 +133,14 @@ public class ReactAgent {
     }
 
     private AgentLoopExecutor createExecutor() {
-        // 合并所有 PauseAdvisor 的拦截工具名和用户输入工具名
-        // 兼容多个 PauseAdvisor 共存的场景
-        // 例如：用户手动配 PauseAdvisor("write_file") + askUser(true) 自动加 PauseAdvisor(askUserTool="ask_user")
-        PauseAdvisor pauseAdvisor = null;
-        Set<String> allInterceptedTools = new HashSet<>();
-        String mergedAskUserToolName = null;
+        // 从 PauseAdvisor 中提取 askUserToolName，供 ToolCallExecutor 的 resume 逻辑使用
+        String askUserToolName = null;
         for (Advisor advisor : advisors) {
             if (advisor instanceof PauseAdvisor pa) {
-                allInterceptedTools.addAll(pa.getInterceptToolNames());
-                // 合并用户输入工具名（多个时 last-one-wins）
                 if (pa.getAskUserToolName() != null) {
-                    mergedAskUserToolName = pa.getAskUserToolName();
+                    askUserToolName = pa.getAskUserToolName();
                 }
             }
-        }
-        // 从拦截集合中移除用户输入工具，避免重复
-        if (mergedAskUserToolName != null) {
-            allInterceptedTools.remove(mergedAskUserToolName);
-        }
-        if (!allInterceptedTools.isEmpty() || mergedAskUserToolName != null) {
-            pauseAdvisor = PauseAdvisor.builder()
-                    .approvalTools(allInterceptedTools)
-                    .askUserTool(mergedAskUserToolName)
-                    .build();
         }
 
         var executorBuilder = AgentLoopExecutor.builder()
@@ -155,8 +152,10 @@ public class ReactAgent {
                 .instructions(instructions)
                 .memoryStore(memoryStore)
                 .chatModel(chatModel)
-                .profileMemoryEnabled(profileMemoryEnabled)
-                .pauseAdvisor(pauseAdvisor)
+                .enableProfileMemory(enableProfileMemory)
+                .enableSession(enableSession)
+                .enableTrace(enableTrace)
+                .askUserToolName(askUserToolName)
                 .stageOutputProviders(stageOutputProviders)
                 .thinkingMode(thinkingMode)
                 .maxRetries(maxRetries)
@@ -175,6 +174,11 @@ public class ReactAgent {
         // 延迟工具注册（可选）
         if (deferredToolRegistry != null) {
             executorBuilder.deferredToolRegistry(deferredToolRegistry);
+        }
+
+        // 审计 trace（可选）
+        if (traceStore != null) {
+            executorBuilder.traceStore(traceStore);
         }
 
         return executorBuilder.build();
@@ -325,6 +329,28 @@ public class ReactAgent {
 
     // ==================== Getters ====================
 
+    public String getName() {
+        return name;
+    }
+
+    public String getDescription() {
+        return description;
+    }
+
+    /**
+     * 配置为 SubAgent 模式（由父 Agent 的 build() 在 wrap supplier 中调用）。
+     * <p>
+     * - 禁用 session：不记录 agentx_session<br>
+     * - 注入父 TraceStore：复用父 Agent 的 trace 审计（受父 enableTrace 控制，null 则不记录）<br>
+     * - profile memory 天然无：SubAgent 无 DataSource，不创建 memoryStore
+     * <p>
+     * createExecutor() 每次调用时读取这些字段，因此构建后设置即可生效。
+     */
+    void configureAsSubAgent(TraceStore parentTraceStore) {
+        this.enableSession = false;
+        this.traceStore = parentTraceStore;
+    }
+
     public ChatClient getChatClient() {
         return chatClient;
     }
@@ -373,6 +399,8 @@ public class ReactAgent {
      * Builder 模式构建 ReactAgent
      */
     public static class Builder {
+        private String name;
+        private String description;
         private ChatModel chatModel;
         private final List<ToolCallback> tools = new ArrayList<>();
         private final List<Advisor> advisors = new ArrayList<>();
@@ -381,13 +409,26 @@ public class ReactAgent {
         private String instructions;
         private DataSource dataSource;
         private SemanticMemoryStore semanticMemoryStore;
-        private boolean profileMemoryEnabled = true;
+        private boolean enableProfileMemory = true;
+        private boolean enableSession = true;
         private boolean askUser = false;
         private final List<StageOutputProvider> stageOutputProviders = new ArrayList<>();
         private ThinkingMode thinkingMode = ThinkingMode.DISABLED;
         private int maxRetries = 3;
         private ContextPolicy contextPolicy;
         private DeferredToolRegistry deferredToolRegistry;
+        private boolean enableTrace = true;
+        private final List<Supplier<ReactAgent>> subAgentProviders = new ArrayList<>();
+
+        public Builder name(String name) {
+            this.name = name;
+            return this;
+        }
+
+        public Builder description(String description) {
+            this.description = description;
+            return this;
+        }
 
         public Builder chatModel(ChatModel chatModel) {
             this.chatModel = chatModel;
@@ -487,8 +528,21 @@ public class ReactAgent {
          *
          * @param enabled true 启用（默认），false 禁用
          */
-        public Builder profileMemoryEnabled(boolean enabled) {
-            this.profileMemoryEnabled = enabled;
+        public Builder enableProfileMemory(boolean enabled) {
+            this.enableProfileMemory = enabled;
+            return this;
+        }
+
+        /**
+         * 是否启用会话历史记录（agentx_session）。
+         * <p>
+         * 禁用后，框架不保存对话历史到数据库，适用于 SubAgent 等无状态场景。
+         * 默认启用。
+         *
+         * @param enabled true 启用（默认），false 禁用
+         */
+        public Builder enableSession(boolean enabled) {
+            this.enableSession = enabled;
             return this;
         }
 
@@ -548,8 +602,12 @@ public class ReactAgent {
         }
 
         /**
-         * 启用<think></think>标签解析。
-         * 适用于 MiniMax M2.7 等使用<think></think>标签的模型。
+         * 启用 &lt;think/&gt; 标签解析。
+         * <p>
+         * 启用后，LLM 输出中的 &lt;think&gt;...&lt;/think&gt; 内容会被拆分为
+         * {@link AgentStreamEvent.Thinking} 事件，标签外的内容为 {@link AgentStreamEvent.Text} 事件。
+         * <p>
+         * 适用于 MiniMax M2.7、Qwen3.5 等使用 &lt;think/&gt; 标签的模型。
          * 默认 false。
          *
          * @param enabled true 启用
@@ -566,7 +624,7 @@ public class ReactAgent {
          * <p>
          * 不同厂商的思考模型通过不同方式返回推理过程，调用方需根据模型类型选择对应模式：
          * <ul>
-         *   <li>{@link ThinkingMode#THINK_TAG} - 思考内容嵌入 content 中的 &lt;think/&gt; 标签（MiniMax 等）</li>
+         *   <li>{@link ThinkingMode#THINK_TAG} - 思考内容嵌入 content 中的 &lt;think/&gt; 标签（MiniMax等）</li>
          *   <li>{@link ThinkingMode#REASONING_CONTENT} - 思考内容通过独立 reasoning_content 字段返回（DeepSeek、Qwen3.6 等）</li>
          * </ul>
          * <p>
@@ -662,6 +720,67 @@ public class ReactAgent {
             return this;
         }
 
+        /**
+         * 注册子 Agent。
+         * <p>
+         * 子 Agent 会被包装为 {@code call_{name}} 工具，主 Agent 的 LLM 根据描述自动决定是否委派。
+         * 子 Agent 在独立 context window 中运行，只使用显式指定的工具，不与用户交互。
+         *
+         * <p>build() 时会调用一次 supplier 提取 name/description 元数据，后续每次实际调用再创建新实例。
+         *
+         * <p>约束（Phase 1）：
+         * <ul>
+         *   <li>子 Agent 必须设置 name 和 description</li>
+         *   <li>禁止嵌套：子 Agent 不能再包含 SubAgentTool</li>
+         *   <li>禁止 AskUser：子 Agent 不能与用户直接交互</li>
+         *   <li>禁止 PauseAdvisor：子 Agent 不能暂停等人工</li>
+         * </ul>
+         *
+         * <p>示例：
+         * <pre>{@code
+         * ReactAgent agent = ReactAgent.builder()
+         *     .chatModel(chatModel)
+         *     .tools(bashTool, readTool)
+         *     .subAgent(() -> ReactAgent.builder()
+         *         .name("expert")
+         *         .description("领域专家，处理专业问题")
+         *         .chatModel(chatModel)
+         *         .instructions("你是领域专家...")
+         *         .tools(readTool, grepTool)
+         *         .build())
+         *     .build();
+         * }</pre>
+         *
+         * @param agentProvider 子 Agent 工厂（每次调用创建新实例，保证线程安全）
+         */
+        public Builder subAgent(Supplier<ReactAgent> agentProvider) {
+            this.subAgentProviders.add(agentProvider);
+            return this;
+        }
+
+        /**
+         * 启用 LLM 调用审计（内置 {@link RequestLoggingAdvisor}）。
+         * <p>
+         * 启用后，每次 LLM 调用前会打印入参 JSON，并将请求/响应记录到 {@code agentx_trace} 表。
+         * 需要同时配置 {@link #dataSource(DataSource)} 才会入库；仅有 dataSource 或仅有 enableTrace 均不满足。
+         * <p>
+         * 默认 true。
+         *
+         * @param enableTrace true 启用（默认），false 禁用
+         */
+        public Builder enableTrace(boolean enableTrace) {
+            this.enableTrace = enableTrace;
+            return this;
+        }
+
+        /**
+         * 向后兼容：等同于 {@link #enableTrace(boolean)}。
+         */
+        public Builder requestLogging(boolean requestLogging) {
+            this.enableTrace = requestLogging;
+            return this;
+        }
+
         public ReactAgent build() {
             Objects.requireNonNull(chatModel, "chatModel must not be null");
 
@@ -669,10 +788,13 @@ public class ReactAgent {
             MemoryStore memoryStore = null;
             SemanticMemoryManager semanticMemoryManager = null;
 
-            // 传入 DataSource 时，框架自动管理会话记忆和长期记忆
+            // 传入 DataSource 时，框架创建所有存储对象（session/memory/trace）
+            // 是否实际写入由各 enableXXX 在运行时控制
+            TraceStore traceStore = null;
             if (dataSource != null) {
                 chatMemory = DataSourceStorageFactory.createChatMemory(dataSource);
                 memoryStore = DataSourceStorageFactory.createMemoryStore(dataSource);
+                traceStore = DataSourceStorageFactory.createTraceStore(dataSource);
             }
 
             // 传入 SemanticMemoryStore 时，启用语义记忆（第三层）
@@ -693,7 +815,32 @@ public class ReactAgent {
                 }
             }
 
-            return new ReactAgent(this, chatMemory, memoryStore, semanticMemoryManager);
+            // requestLogging=true 时自动注册内置 RequestLoggingAdvisor
+            if (enableTrace) {
+                advisors.add(new RequestLoggingAdvisor(chatModel));
+            }
+
+            // 处理 SubAgent：调一次 supplier 提取 name/description，注册为工具
+            // wrap supplier：每次创建子 Agent 后自动配置为 SubAgent 模式
+            // - 禁用 session（不记录 agentx_session）
+            // - 注入父 TraceStore（受父 enableTrace 控制，要开一起开）
+            final TraceStore subAgentTraceStore = this.enableTrace ? traceStore : null;
+            for (Supplier<ReactAgent> provider : subAgentProviders) {
+                ReactAgent prototype = provider.get();
+                String agentName = prototype.getName();
+                String agentDesc = prototype.getDescription();
+                if (agentName == null || agentName.isBlank()) {
+                    throw new IllegalArgumentException("SubAgent 必须设置 name");
+                }
+                Supplier<ReactAgent> wrappedProvider = () -> {
+                    ReactAgent agent = provider.get();
+                    agent.configureAsSubAgent(subAgentTraceStore);
+                    return agent;
+                };
+                tools.add(new SubAgentTool.SubAgentToolCallback(agentName, agentDesc, wrappedProvider));
+            }
+
+            return new ReactAgent(this, chatMemory, memoryStore, semanticMemoryManager, traceStore);
         }
     }
 }

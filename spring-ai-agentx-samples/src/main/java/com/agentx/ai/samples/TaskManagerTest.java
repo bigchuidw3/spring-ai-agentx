@@ -15,7 +15,7 @@ import org.springframework.ai.chat.model.ChatModel;
  * - 测试 3：无 TaskManager — 不配置时正常工作，并发不受限
  *
  * @author bigchui
- *
+ * 
  */
 public class TaskManagerTest {
 

@@ -31,7 +31,7 @@ import java.util.function.Function;
  * }
  *
  * @author bigchui
- *
+ * 
  */
 public class PythonTool implements Function<PythonTool.PythonRequest, String> {
 
@@ -148,7 +148,7 @@ public class PythonTool implements Function<PythonTool.PythonRequest, String> {
 
         try (Context context = Context.newBuilder("python")
                 .engine(engine)
-                .allowAllAccess(true)        // 安全：默认限制访问权限
+                .allowAllAccess(false)        // 安全：默认限制访问权限
                 .allowIO(true)                // 允许文件 I/O（pptx 等包需要）
                 .allowNativeAccess(false)     // 安全：禁用本地访问
                 .allowCreateProcess(false)    // 安全：禁用进程创建

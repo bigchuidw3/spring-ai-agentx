@@ -20,7 +20,7 @@ import org.springframework.ai.chat.model.ChatModel;
  * </pre>
  *
  * @author bigchui
- *
+ * 
  */
 public class ContextManagementTest {
 
@@ -90,7 +90,7 @@ public class ContextManagementTest {
                 .build();
 
         String query = "请依次执行以下操作：1) 列出当前目录下的文件 2) 新建一个test.py，生成任意的测试python脚本，输出打印即可，必须大于50行代码 "
-                + "3) 用 bash 执行 echo hello 4) 再列出当前目录文件。每一步都要调用工具。5) 在检查下当前环境python可不可用。6）在桌面新建一个te.txt，内容是hello te";
+                + "3) 用 bash 执行 echo hello 4) 再列出当前目录文件。每一步都要调用工具。5) 在检查下当前环境python可不可用。6）在桌面新建一个wz.txt，内容是hello wangzhen";
         streamAndPrint(agent, query, params);
     }
 

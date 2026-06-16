@@ -2,10 +2,7 @@ package com.agentx.ai.samples;
 
 import com.agentx.ai.core.agent.ReactAgent;
 import com.agentx.ai.core.advisors.PauseAdvisor;
-import com.agentx.ai.core.model.AgentResult;
-import com.agentx.ai.core.model.PendingToolCall;
-import com.agentx.ai.core.model.PauseState;
-import com.agentx.ai.core.model.RunnableParams;
+import com.agentx.ai.core.model.*;
 import com.agentx.ai.core.tools.AskUserTool;
 import com.agentx.ai.core.tools.FileSystemTools;
 import org.springframework.ai.chat.model.ChatModel;
@@ -33,7 +30,7 @@ import java.util.Scanner;
  * </ul>
  *
  * @author bigchui
- * 
+ *
  */
 public class HumanInTheLoopTest {
 
@@ -291,10 +288,10 @@ public class HumanInTheLoopTest {
     public static void testCustomAskUserTool() {
         TestConfig.printTestHeader("测试 6：自定义 askUserTool + 流式 + 文件审批");
 
-        ChatModel chatModel = TestConfig.createZhiPuChatModel();
+        ChatModel chatModel = TestConfig.createDeepSeekV4ChatModel();
         Scanner scanner = new Scanner(System.in);
 
-        ToolCallback customAskTool = ToolCallbacks.from(new CustomAskTool())[0];
+//        ToolCallback customAskTool = ToolCallbacks.from(new CustomAskTool())[0];
 
         ReactAgent agent = ReactAgent.builder()
                 .chatModel(chatModel)
@@ -305,6 +302,8 @@ public class HumanInTheLoopTest {
                         .approvalTools("write_file")
 //                        .askUserTool("custom_ask")
                         .build())
+                .thinkingMode(ThinkingMode.REASONING_CONTENT)
+                .requestLogging(true)
                 .maxRounds(20)
                 .build();
 

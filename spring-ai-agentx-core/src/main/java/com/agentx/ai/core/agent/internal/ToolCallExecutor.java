@@ -1,6 +1,5 @@
 package com.agentx.ai.core.agent.internal;
 
-import com.agentx.ai.core.advisors.PauseAdvisor;
 import com.agentx.ai.core.model.AgentStreamEvent;
 import com.agentx.ai.core.model.PendingToolCall;
 import com.agentx.ai.core.model.RunnableParams;
@@ -20,7 +19,12 @@ import org.springframework.ai.tool.ToolCallback;
 import reactor.core.publisher.Sinks;
 import reactor.core.scheduler.Schedulers;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -46,21 +50,33 @@ public class ToolCallExecutor {
 
     private final Map<String, ToolCallback> toolMap;
     private final ObjectMapper objectMapper;
-    private final PauseAdvisor pauseAdvisor;
+    private final String askUserToolName;
     private final StageOutputManager stageManager;
 
     public ToolCallExecutor(Map<String, ToolCallback> toolMap, ObjectMapper objectMapper,
-                            PauseAdvisor pauseAdvisor, StageOutputManager stageManager) {
+                            String askUserToolName, StageOutputManager stageManager) {
         this.toolMap = toolMap;
         this.objectMapper = objectMapper;
-        this.pauseAdvisor = pauseAdvisor;
+        this.askUserToolName = askUserToolName;
         this.stageManager = stageManager;
     }
 
     /**
-     * 执行单个工具调用。
+     * 执行单个工具调用（非流式路径，sink 为 null）。
      */
     public ToolExecutionResult executeSingleTool(AssistantMessage.ToolCall toolCall, RunnableParams params) {
+        return executeSingleTool(toolCall, params, null);
+    }
+
+    /**
+     * 执行单个工具调用。
+     *
+     * @param toolCall 工具调用信息
+     * @param params   调用参数
+     * @param sink     事件 Sink（流式路径不为 null，非流式路径为 null）
+     */
+    public ToolExecutionResult executeSingleTool(AssistantMessage.ToolCall toolCall, RunnableParams params,
+                                                  Sinks.Many<AgentStreamEvent> sink) {
         String toolName = toolCall.name();
         String argsJson = toolCall.arguments();
 
@@ -81,7 +97,7 @@ public class ToolCallExecutor {
 
         Object result;
         try {
-            ToolContext toolContext = buildToolContext(params);
+            ToolContext toolContext = buildToolContext(params, sink);
             result = callback.call(argsJson, toolContext);
         } catch (Exception e) {
             log.error("Tool '{}' execution failed: {}", toolName, e.getMessage(), e);
@@ -152,7 +168,7 @@ public class ToolCallExecutor {
 
             Schedulers.boundedElastic().schedule(() -> {
                 try {
-                    ToolExecutionResult toolResult = executeSingleTool(tc, params);
+                    ToolExecutionResult toolResult = executeSingleTool(tc, params, sink);
                     results.set(index, collectToolCallMessages(tc, toolResult));
                     execDetails.set(index, new ToolExecDetail(tc, toolResult.rawResult(), null));
                 } catch (Exception ex) {
@@ -197,7 +213,7 @@ public class ToolCallExecutor {
                                           Map<String, String> toolResults,
                                           RunnableParams params) {
         // 用户输入工具：用户回答即工具结果，不需要执行
-        if (pauseAdvisor != null && pauseAdvisor.isAskUserTool(ptc.name())) {
+        if (askUserToolName != null && askUserToolName.equals(ptc.name())) {
             return toolResults.getOrDefault(ptc.id(), "");
         }
         String userResponse = toolResults.getOrDefault(ptc.id(), "");
@@ -293,7 +309,7 @@ public class ToolCallExecutor {
 
     // ==================== 辅助方法 ====================
 
-    private ToolContext buildToolContext(RunnableParams params) {
+    private ToolContext buildToolContext(RunnableParams params, Sinks.Many<AgentStreamEvent> sink) {
         Map<String, Object> context = new HashMap<>();
         if (params != null) {
             if (params.getUserId() != null) {
@@ -302,6 +318,10 @@ public class ToolCallExecutor {
             if (params.getConversationId() != null) {
                 context.put("conversationId", params.getConversationId());
             }
+            context.put("runnableParams", params);
+        }
+        if (sink != null) {
+            context.put("eventSink", sink);
         }
         return new ToolContext(context);
     }

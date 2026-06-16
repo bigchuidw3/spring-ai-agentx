@@ -26,7 +26,7 @@ import java.util.Optional;
  * 适用于零配置模式（用户提供 DataSource，框架自动管理表结构）。
  *
  * 表结构：
- * CREATE TABLE IF NOT EXISTS agentx_memory (
+ * CREATE TABLE agentx_memory (
  *     id            BIGINT       NOT NULL,
  *     user_id       VARCHAR(100) NOT NULL,
  *     type          VARCHAR(20)  NOT NULL,
@@ -47,12 +47,8 @@ public class JdbcMemoryStore implements MemoryStore {
 
     private static final Logger log = LoggerFactory.getLogger(JdbcMemoryStore.class);
 
-    private static final String CHECK_TABLE_SQL = """
-            SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'agentx_memory'
-            """;
-
     private static final String CREATE_TABLE_SQL = """
-            CREATE TABLE IF NOT EXISTS agentx_memory (
+            CREATE TABLE agentx_memory (
                 id            BIGINT       NOT NULL,
                 user_id       VARCHAR(100) NOT NULL,
                 type          VARCHAR(20)  NOT NULL,
@@ -64,6 +60,18 @@ public class JdbcMemoryStore implements MemoryStore {
                 PRIMARY KEY (id)
             )
             """;
+
+    private static final String[] COMMENT_SQLS = {
+            "COMMENT ON TABLE agentx_memory IS 'AgentX记忆存储表'",
+            "COMMENT ON COLUMN agentx_memory.id IS '主键ID'",
+            "COMMENT ON COLUMN agentx_memory.user_id IS '用户ID'",
+            "COMMENT ON COLUMN agentx_memory.type IS '记忆类型'",
+            "COMMENT ON COLUMN agentx_memory.content IS '记忆内容'",
+            "COMMENT ON COLUMN agentx_memory.description IS '记忆描述'",
+            "COMMENT ON COLUMN agentx_memory.metadata_json IS '元数据JSON'",
+            "COMMENT ON COLUMN agentx_memory.created_at IS '创建时间'",
+            "COMMENT ON COLUMN agentx_memory.updated_at IS '更新时间'"
+    };
 
     private static final String CREATE_INDEX_SQL_1 = """
             CREATE INDEX idx_agentx_memory_user_id ON agentx_memory (user_id)
@@ -136,14 +144,26 @@ public class JdbcMemoryStore implements MemoryStore {
         if (!initialized) {
             synchronized (this) {
                 if (!initialized) {
-                    Integer count = jdbcTemplate.queryForObject(CHECK_TABLE_SQL, Integer.class);
-                    if (count == null || count == 0) {
+                    try {
                         jdbcTemplate.execute(CREATE_TABLE_SQL);
+                        for (String commentSql : COMMENT_SQLS) {
+                            try {
+                                jdbcTemplate.execute(commentSql);
+                            } catch (Exception e) {
+                                log.debug("Comment skipped: {}", e.getMessage());
+                            }
+                        }
+                    } catch (Exception e) {
+                        log.debug("Table creation skipped (may already exist): {}", e.getMessage());
+                    }
+                    try {
                         jdbcTemplate.execute(CREATE_INDEX_SQL_1);
                         jdbcTemplate.execute(CREATE_INDEX_SQL_2);
-                        log.info("agentx_memory table created");
+                    } catch (Exception e) {
+                        log.debug("Index creation skipped: {}", e.getMessage());
                     }
                     initialized = true;
+                    log.info("agentx_memory table initialized");
                 }
             }
         }

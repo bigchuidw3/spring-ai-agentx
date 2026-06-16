@@ -157,7 +157,7 @@ public class TodoWriteTest {
         System.out.println("ChatModel: " + TestConfig.CHAT_MODEL);
         System.out.println("===============================================");
 
-        int testNumber = 1;
+        int testNumber = 3;
 
         switch (testNumber) {
             case 1 -> testStreamWithTodoWrite();

@@ -121,16 +121,16 @@ public class LlmInvoker {
         ChatClient.Builder clientBuilder = ChatClient.builder(chatModel);
 
         if (!advisors.isEmpty()) {
-            clientBuilder.defaultAdvisors(advisors.toArray(new Advisor[0]));
+            clientBuilder.defaultAdvisors(advisors);
         }
 
         var toolOptions = ToolCallingChatOptions.builder()
-                .toolCallbacks(roundTools.toArray(new ToolCallback[0]))
+                .toolCallbacks(roundTools)
                 .internalToolExecutionEnabled(false)
                 .build();
 
         clientBuilder.defaultOptions(toolOptions);
-        clientBuilder.defaultToolCallbacks(roundTools.toArray(new ToolCallback[0]));
+        clientBuilder.defaultToolCallbacks(roundTools);
 
         return clientBuilder.build();
     }

@@ -207,6 +207,27 @@ ReactAgent agent = ReactAgent.builder()
 
 String answer = agent.call("帮我设计一个订单系统的架构");
 ```
+### 6. 数据持久化与精细控制
+
+传入 `DataSource` 后，框架自动创建三张表并启用对应能力。通过 `enableXXX` 参数可独立控制每一项（均默认为 `true`）：
+
+```java
+ReactAgent agent = ReactAgent.builder()
+        .chatModel(chatModel)
+        .dataSource(dataSource)
+        .enableSession(true)            // 会话历史（agentx_session），默认 true
+        .enableTrace(true)              // 调用审计（agentx_trace），默认 true
+        .enableProfileMemory(true)      // 用户画像（agentx_memory），默认 true
+        .build();
+```
+
+| 参数 | 控制内容 | 关闭场景 |
+|------|----------|----------|
+| `enableSession` | 对话历史保存与加载 | SubAgent 等无状态场景（框架自动关闭） |
+| `enableTrace` | LLM 调用链路审计 | 不需要调用追踪时 |
+| `enableProfileMemory` | 用户画像自动提取与注入 | 安全要求高，防止诱导生成记忆 |
+
+> **SubAgent 说明**：子 Agent 无需传 DataSource，框架自动注入父 Agent 的 TraceStore（trace 跟随父开关），session 和 profile memory 自动关闭。详见 [18-SubAgent子代理](docs/core/18-SubAgent子代理.md)。
 
 ---
 
@@ -232,6 +253,8 @@ String answer = agent.call("帮我设计一个订单系统的架构");
 | 14 | 综合示例 | Skills + HITL + 分阶段输出完整示例 | [14-综合示例](docs/core/14-综合示例.md) |
 | 15 | DeepSeek-V4 兼容 | reasoning_content 回传兼容性修复与使用指南 | [15-DeepSeek-V4兼容](docs/core/15-DeepSeek-V4兼容.md) |
 | 16 | TodoWrite 任务追踪 | 结构化任务列表，多步骤任务进度可视化 | [16-TodoWrite任务追踪](docs/core/16-TodoWrite任务追踪.md) |
+| 17 | TraceAudit 追踪审计 | agentx_trace 表记录请求/响应/Token，Complete 事件携带 token 累计 | [17-TraceAudit追踪审计](docs/core/17-TraceAudit追踪审计.md) |
+| 18 | SubAgent 子代理 | 主 Agent 委派任务给子 Agent，独立 context，流式事件转发，SubAgentSource 来源标识 | [18-SubAgent子代理](docs/core/18-SubAgent子代理.md) |
 
 ---
 
@@ -269,6 +292,8 @@ cp secrets.properties.example secrets.properties
 | `ToolSearchTest` | ToolSearch 工具检索 | 同步/流式调用、Session 隔离验证 |
 | `StructuredOutputTest` | 结构化输出 | call/callForResult 单对象与集合输出 |
 | `TodoWriteTest` | TodoWrite 任务追踪 | 流式/非流式 TodoProgress 事件，纯 TodoWrite 场景 |
+| `TraceAuditTest` | TraceAudit 追踪审计 | 非流/流式多轮工具调用 + agentx_trace 入库 + Complete 事件 token 累计 |
+| `SubAgentTest` | SubAgent 子代理 | 非流/流式委派，SubAgentSource 事件标识，trace 自动继承 |
 
 > 各示例内部通过 `testNumber` 切换测试场景，修改后直接运行 `main` 方法即可。
 
@@ -305,8 +330,8 @@ cp secrets.properties.example secrets.properties
 ### v1.0.0-M2（当前版本）
 
 - [x] TodoWrite 任务追踪 — 结构化任务列表工具，流式 TodoProgress 进度事件
-- [ ] SubAgent 机制（Agent Tools） — 将 Agent 封装为另一个 Agent 的工具
-- [ ] 后置任务校验机制 — 任务完成后引入模型校验或规则校验
+- [x] TraceAudit 追踪审计 — `agentx_trace` 表记录每轮 LLM 调用请求/响应/Token，Complete 事件携带 token 累计，支持大模型调用链路审计
+- [x] SubAgent 子代理 — 主 Agent 委派任务给专门的子 Agent，独立 context window，流式事件转发（SubAgentSource 来源标识），自动继承父 Agent trace 审计，框架自动禁用 session/profile memory
 
 ### v1.0.0-M3（规划中）
 

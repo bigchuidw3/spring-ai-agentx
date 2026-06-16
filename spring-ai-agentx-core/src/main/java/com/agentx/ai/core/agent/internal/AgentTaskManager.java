@@ -26,7 +26,7 @@ public class AgentTaskManager {
 
     public static class TaskInfo {
         private final Sinks.Many<ChatResponse> sink;
-        private Disposable disposable;
+        private volatile Disposable disposable;
         private final long createTime;
 
         TaskInfo(Sinks.Many<ChatResponse> sink) {
@@ -52,24 +52,32 @@ public class AgentTaskManager {
     }
 
     public TaskInfo registerTask(String conversationId, Sinks.Many<ChatResponse> sink) {
-        TaskInfo existing = taskMap.putIfAbsent(conversationId, new TaskInfo(sink));
+        TaskInfo newTask = new TaskInfo(sink);
+        TaskInfo existing = taskMap.putIfAbsent(conversationId, newTask);
         if (existing != null) {
             log.warn("Task already exists for conversation: {}", conversationId);
             return null;
         }
-        log.info("Registered task for conversation: {}", conversationId);
-        return existing != null ? existing : taskMap.get(conversationId);
+        log.debug("Registered task for conversation: {}", conversationId);
+        return newTask;
     }
 
     public void setDisposable(String conversationId, Disposable disposable) {
         TaskInfo taskInfo = taskMap.get(conversationId);
         if (taskInfo != null) {
             taskInfo.setDisposable(disposable);
+        } else {
+            // task 已被 stopTask 移除（如客户端断连），直接 dispose 防止泄漏
+            if (disposable != null && !disposable.isDisposed()) {
+                disposable.dispose();
+                log.debug("Task already removed, disposed orphaned subscription: {}", conversationId);
+            }
         }
     }
 
     public boolean stopTask(String conversationId) {
-        TaskInfo taskInfo = taskMap.get(conversationId);
+        // 原子操作：remove 同时拿回并删除，防止 get 和 remove 之间新任务被误删
+        TaskInfo taskInfo = taskMap.remove(conversationId);
         if (taskInfo == null) {
             log.warn("No running task for conversation: {}", conversationId);
             return false;
@@ -79,16 +87,15 @@ public class AgentTaskManager {
             Disposable disposable = taskInfo.getDisposable();
             if (disposable != null && !disposable.isDisposed()) {
                 disposable.dispose();
-                log.info("Disposed underlying call for conversation: {}", conversationId);
+                log.debug("Disposed underlying call for conversation: {}", conversationId);
             }
 
             var sink = taskInfo.getSink();
             if (sink != null) {
                 sink.tryEmitComplete();
-                log.info("Completed stream output for conversation: {}", conversationId);
+                log.debug("Completed stream output for conversation: {}", conversationId);
             }
 
-            taskMap.remove(conversationId);
             return true;
         } catch (Exception e) {
             log.error("Failed to stop task for conversation: {}", conversationId, e);
@@ -99,7 +106,7 @@ public class AgentTaskManager {
     public void removeTask(String conversationId) {
         TaskInfo removed = taskMap.remove(conversationId);
         if (removed != null) {
-            log.info("Removed task for conversation: {}", conversationId);
+            log.debug("Removed task for conversation: {}", conversationId);
         }
     }
 

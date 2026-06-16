@@ -1,9 +1,9 @@
 package com.agentx.ai.core.memory.util;
 
+import com.agentx.ai.core.model.RunnableParams;
 import com.agentx.ai.core.memory.extractor.MemoryExtractor;
 import com.agentx.ai.core.memory.semantic.SemanticMemoryManager;
 import com.agentx.ai.core.memory.store.MemoryStore;
-import com.agentx.ai.core.model.RunnableParams;
 import com.agentx.ai.core.stage.ThinkTagParser;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -38,27 +38,27 @@ public class MemoryPersistor {
     private final MemoryStore memoryStore;
     private final ChatModel chatModel;
     private final SemanticMemoryManager semanticMemoryManager;
-    private final boolean profileMemoryEnabled;
+    private final boolean enableProfileMemory;
 
     public MemoryPersistor(MemoryStore memoryStore, ChatModel chatModel,
-                           SemanticMemoryManager semanticMemoryManager,
-                           boolean profileMemoryEnabled, ExecutorService executor) {
+                    SemanticMemoryManager semanticMemoryManager,
+                    boolean enableProfileMemory, ExecutorService executor) {
         this.memoryStore = memoryStore;
         this.chatModel = chatModel;
         this.semanticMemoryManager = semanticMemoryManager;
-        this.profileMemoryEnabled = profileMemoryEnabled;
+        this.enableProfileMemory = enableProfileMemory;
     }
 
     /**
      * 向后兼容的构造函数（忽略 executor 参数，使用静态共享线程池）。
      */
     public MemoryPersistor(MemoryStore memoryStore, ChatModel chatModel,
-                           SemanticMemoryManager semanticMemoryManager,
-                           boolean profileMemoryEnabled) {
+                    SemanticMemoryManager semanticMemoryManager,
+                    boolean enableProfileMemory) {
         this.memoryStore = memoryStore;
         this.chatModel = chatModel;
         this.semanticMemoryManager = semanticMemoryManager;
-        this.profileMemoryEnabled = profileMemoryEnabled;
+        this.enableProfileMemory = enableProfileMemory;
     }
 
     /**
@@ -80,7 +80,7 @@ public class MemoryPersistor {
      * 异步提取用户画像到 MemoryStore。
      */
     private void extractMemoriesIfEnabled(RunnableParams params, String question, String answer) {
-        if (!profileMemoryEnabled || memoryStore == null || chatModel == null
+        if (!enableProfileMemory || memoryStore == null || chatModel == null
                 || params == null || params.getUserId() == null) {
             return;
         }

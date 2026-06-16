@@ -1,11 +1,11 @@
 package com.agentx.ai.core.tools;
 
+import java.util.List;
+
 import org.springframework.ai.support.ToolCallbacks;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
-
-import java.util.List;
 
 /**
  * 任务列表管理工具，灵感来源于 Claude Code 的 TodoWrite。
@@ -16,10 +16,11 @@ import java.util.List;
  * 进度推送由框架自动处理：ToolCallExecutor 在执行完 TodoWrite 后，
  * 自动解析参数并发射 {@link com.agentx.ai.core.model.AgentStreamEvent.TodoProgress} 事件。
  *
- * @author Christian Tzolov (original), bigchui (adapted)
+ * @author Christian Tzolov (original), WANG ZHEN (adapted)
  */
 public class TodoWriteTool {
 
+	// @formatter:off
 	@Tool(name = "TodoWrite", description = """
 		创建和管理结构化任务列表，用于跟踪多步骤任务的进度。
 

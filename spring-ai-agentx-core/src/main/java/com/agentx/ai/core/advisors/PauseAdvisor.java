@@ -1,7 +1,7 @@
 package com.agentx.ai.core.advisors;
 
-import com.agentx.ai.core.model.AgentResult;
 import com.agentx.ai.core.model.PendingToolCall;
+import com.agentx.ai.core.model.AgentResult;
 import org.springframework.ai.chat.client.ChatClientMessageAggregator;
 import org.springframework.ai.chat.client.ChatClientRequest;
 import org.springframework.ai.chat.client.ChatClientResponse;
@@ -13,7 +13,11 @@ import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.model.ChatResponse;
 import reactor.core.publisher.Flux;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -131,6 +135,8 @@ public class PauseAdvisor implements CallAdvisor, StreamAdvisor {
                     if (!pending.isEmpty()) {
                         aggregated.context().put(PAUSE_REQUIRED, true);
                         aggregated.context().put(PENDING_TOOLS, pending);
+                        // 发射带 PAUSE_REQUIRED 标记的聚合响应，供下游读取 context
+                        return Flux.just(aggregated);
                     }
                 }
                 return Flux.empty();

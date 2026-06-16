@@ -41,17 +41,19 @@ public class LoopMessageBuilder {
     private final ThinkingMode thinkingMode;
     private final DeferredToolRegistry deferredToolRegistry;
     private final boolean todoWriteEnabled;
+    private final boolean enableSession;
 
     public LoopMessageBuilder(String instructions, ChatMemory chatMemory,
                               MemoryInjector memoryInjector, ThinkingMode thinkingMode,
                               DeferredToolRegistry deferredToolRegistry,
-                              boolean todoWriteEnabled) {
+                              boolean todoWriteEnabled, boolean enableSession) {
         this.instructions = instructions;
         this.chatMemory = chatMemory;
         this.memoryInjector = memoryInjector;
         this.thinkingMode = thinkingMode;
         this.deferredToolRegistry = deferredToolRegistry;
         this.todoWriteEnabled = todoWriteEnabled;
+        this.enableSession = enableSession;
     }
 
     /**
@@ -88,7 +90,7 @@ public class LoopMessageBuilder {
         }
 
         String conversationId = params != null ? params.getConversationId() : null;
-        if (chatMemory != null && conversationId != null) {
+        if (enableSession && chatMemory != null && conversationId != null) {
             List<Message> history = chatMemory.get(conversationId);
             for (Message msg : history) {
                 if (!(msg instanceof SystemMessage)) {
@@ -121,7 +123,7 @@ public class LoopMessageBuilder {
      */
     public void saveToChatMemory(String query, String answer, String think,
                                  String conversationId, String userId) {
-        if (chatMemory == null || conversationId == null || query == null || query.isEmpty()) {
+        if (!enableSession || chatMemory == null || conversationId == null || query == null || query.isEmpty()) {
             return;
         }
         try {

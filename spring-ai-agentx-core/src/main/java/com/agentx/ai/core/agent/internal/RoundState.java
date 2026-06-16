@@ -4,6 +4,7 @@ import org.springframework.ai.chat.messages.AssistantMessage;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 流式轮次执行状态。
@@ -18,4 +19,5 @@ public class RoundState {
     long promptTokens = -1;
     long completionTokens = -1;
     String finishReason;
+    Map<String, Object> advisorContext;
 }

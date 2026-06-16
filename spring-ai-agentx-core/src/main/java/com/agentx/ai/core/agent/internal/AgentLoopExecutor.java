@@ -1,41 +1,57 @@
 package com.agentx.ai.core.agent.internal;
 
-import com.agentx.ai.core.advisors.PauseAdvisor;
-import com.agentx.ai.core.context.ContextCompactor;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.baomidou.mybatisplus.core.toolkit.IdWorker;
 import com.agentx.ai.core.exception.AgentErrorCode;
 import com.agentx.ai.core.exception.AgentException;
-import com.agentx.ai.core.memory.semantic.SemanticMemoryManager;
-import com.agentx.ai.core.memory.store.MemoryStore;
-import com.agentx.ai.core.memory.util.MemoryInjector;
-import com.agentx.ai.core.memory.util.MemoryPersistor;
-import com.agentx.ai.core.model.*;
+import com.agentx.ai.core.model.AgentResult;
+import com.agentx.ai.core.model.AgentStreamEvent;
+import com.agentx.ai.core.model.PendingToolCall;
+import com.agentx.ai.core.advisors.PauseAdvisor;
+import com.agentx.ai.core.advisors.RequestLoggingAdvisor;
+import com.agentx.ai.core.model.PauseState;
 import com.agentx.ai.core.prompt.PromptConstants;
+import com.agentx.ai.core.model.RunnableParams;
+import com.agentx.ai.core.model.StageOutputProvider;
+import com.agentx.ai.core.model.ThinkingMode;
 import com.agentx.ai.core.stage.AgentExecutionContext;
 import com.agentx.ai.core.stage.StageOutputManager;
 import com.agentx.ai.core.stage.ThinkTagParser;
-import com.agentx.ai.core.tools.toolsearch.DeferredToolRegistry;
 import com.agentx.ai.core.utils.JsonRepairUtil;
-import com.fasterxml.jackson.databind.ObjectMapper;
+
+import com.agentx.ai.core.context.ContextCompactor;
+import com.agentx.ai.core.memory.semantic.SemanticMemoryManager;
+import com.agentx.ai.core.tools.toolsearch.DeferredToolRegistry;
+import com.agentx.ai.core.memory.store.MemoryStore;
+import com.agentx.ai.core.memory.util.MemoryInjector;
+import com.agentx.ai.core.memory.util.MemoryPersistor;
+import com.agentx.ai.core.trace.TraceManager;
+import com.agentx.ai.core.trace.TraceStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.ChatClientResponse;
 import org.springframework.ai.chat.client.advisor.api.Advisor;
-import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.SystemMessage;
-import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.tool.ToolCallback;
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.SignalType;
-import reactor.core.publisher.Sinks;
 import reactor.core.publisher.Sinks.EmitResult;
+import reactor.core.publisher.Sinks;
 import reactor.core.scheduler.Schedulers;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -54,13 +70,14 @@ import java.util.concurrent.atomic.AtomicLong;
 public class AgentLoopExecutor {
 
     private static final Logger log = LoggerFactory.getLogger(AgentLoopExecutor.class);
+    private static final ObjectMapper objectMapper = new ObjectMapper();
 
     /**
      * 重试间隔（毫秒），内置默认值
      */
     private final int maxRounds;
     private final Map<String, ToolCallback> toolMap;
-    private final PauseAdvisor pauseAdvisor;
+    private final String askUserToolName;
     private final AgentTaskManager taskManager;
     private final MemoryInjector memoryInjector;
     private final MemoryPersistor memoryPersistor;
@@ -71,14 +88,20 @@ public class AgentLoopExecutor {
     private final ToolCallExecutor toolCallExecutor;
     private final LlmInvoker llmInvoker;
     private final ContextCompactor contextCompactor;
+    private final TraceStore traceStore;
+    private final boolean enableSession;
+    private final boolean enableTrace;
 
     private AgentLoopExecutor(Builder builder) {
         this.maxRounds = builder.maxRounds;
-        this.pauseAdvisor = builder.pauseAdvisor;
+        this.askUserToolName = builder.askUserToolName;
         this.taskManager = builder.taskManager;
         this.thinkingMode = builder.thinkingMode;
         this.thinkingModeProcessor = new ThinkingModeProcessor(builder.thinkingMode);
         this.contextCompactor = builder.contextCompactor;
+        this.traceStore = builder.traceStore;
+        this.enableSession = builder.enableSession;
+        this.enableTrace = builder.enableTrace;
 
         DeferredToolRegistry.Session deferredToolSession = builder.deferredToolRegistry != null
                 ? builder.deferredToolRegistry.createSession()
@@ -112,23 +135,23 @@ public class AgentLoopExecutor {
 
         // 记忆注入器（对话开始时加载）
         this.memoryInjector = new MemoryInjector(
-                builder.memoryStore, builder.semanticMemoryManager, builder.profileMemoryEnabled);
+                builder.memoryStore, builder.semanticMemoryManager, builder.enableProfileMemory);
 
         // 记忆持久化器
         this.memoryPersistor = new MemoryPersistor(
                 builder.memoryStore, builder.chatModel,
-                builder.semanticMemoryManager, builder.profileMemoryEnabled);
+                builder.semanticMemoryManager, builder.enableProfileMemory);
 
         // 消息构建器
         boolean hasTodoWrite = map.containsKey("TodoWrite");
         this.messageBuilder = new LoopMessageBuilder(
                 builder.instructions, builder.chatMemory,
                 memoryInjector, builder.thinkingMode, builder.deferredToolRegistry,
-                hasTodoWrite);
+                hasTodoWrite, builder.enableSession);
 
         // 工具调用执行器
         this.toolCallExecutor = new ToolCallExecutor(toolMap, new ObjectMapper(),
-                builder.pauseAdvisor, stageManager);
+                builder.askUserToolName, stageManager);
     }
 
     public static Builder builder() {
@@ -145,14 +168,17 @@ public class AgentLoopExecutor {
         private MemoryStore memoryStore;
         private ChatModel chatModel;
         private SemanticMemoryManager semanticMemoryManager;
-        private boolean profileMemoryEnabled = true;
-        private PauseAdvisor pauseAdvisor;
+        private boolean enableProfileMemory = true;
+        private boolean enableSession = true;
+        private boolean enableTrace = true;
+        private String askUserToolName;
         private List<StageOutputProvider> stageOutputProviders;
         private ThinkingMode thinkingMode = ThinkingMode.DISABLED;
         private int maxRetries = 3;
         private ContextCompactor contextCompactor;
         private DeferredToolRegistry deferredToolRegistry;
         private List<Advisor> advisors;
+        private TraceStore traceStore;
 
         public Builder chatClient(ChatClient v) {
             this.chatClient = v;
@@ -199,13 +225,23 @@ public class AgentLoopExecutor {
             return this;
         }
 
-        public Builder profileMemoryEnabled(boolean v) {
-            this.profileMemoryEnabled = v;
+        public Builder enableProfileMemory(boolean v) {
+            this.enableProfileMemory = v;
             return this;
         }
 
-        public Builder pauseAdvisor(PauseAdvisor v) {
-            this.pauseAdvisor = v;
+        public Builder enableSession(boolean v) {
+            this.enableSession = v;
+            return this;
+        }
+
+        public Builder enableTrace(boolean v) {
+            this.enableTrace = v;
+            return this;
+        }
+
+        public Builder askUserToolName(String v) {
+            this.askUserToolName = v;
             return this;
         }
 
@@ -239,6 +275,11 @@ public class AgentLoopExecutor {
             return this;
         }
 
+        public Builder traceStore(TraceStore v) {
+            this.traceStore = v;
+            return this;
+        }
+
         public AgentLoopExecutor build() {
             Objects.requireNonNull(chatClient, "chatClient must not be null");
             return new AgentLoopExecutor(this);
@@ -256,11 +297,96 @@ public class AgentLoopExecutor {
      * @return AgentResult（Completed 或 Paused）
      */
     public AgentResult call(String query, RunnableParams params) {
-        if (thinkingMode == ThinkingMode.REASONING_CONTENT) {
-            return callViaStreamForResult(query, params);
+        String conversationId = params != null ? params.getConversationId() : null;
+        if (taskManager != null && conversationId != null) {
+            if (taskManager.registerTask(conversationId, null) == null) {
+                return new AgentResult.Failed("该会话正在执行中，请稍后再试: " + conversationId,
+                        AgentErrorCode.CONCURRENT_EXECUTION);
+            }
         }
-        List<Message> messages = messageBuilder.buildInitialMessages(query, params);
-        return runLoop(messages, 0, params, query);
+        try {
+            if (thinkingMode == ThinkingMode.REASONING_CONTENT) {
+                return callViaStreamForResult(query, params);
+            }
+            List<Message> messages = messageBuilder.buildInitialMessages(query, params);
+            return runLoop(messages, 0, params, query);
+        } finally {
+            if (taskManager != null && conversationId != null) {
+                taskManager.removeTask(conversationId);
+            }
+        }
+    }
+
+    /**
+     * 初始化 trace：生成 sessionId，创建 TraceManager 存入 execCtx。
+     * 仅在 traceStore 不为 null 且 enableTrace 时执行。
+     */
+    private void initTrace(AgentExecutionContext execCtx, RunnableParams params) {
+        if (traceStore == null || !enableTrace) return;
+        String conversationId = params != null ? params.getConversationId() : null;
+        if (conversationId == null) return;
+        long sessionId = IdWorker.getId();
+        execCtx.setSessionId(sessionId);
+        execCtx.setTraceManager(new TraceManager(traceStore, sessionId, conversationId));
+    }
+
+    /**
+     * 从暂停恢复时恢复 sessionId 和累计 token。
+     */
+    private void initTraceFromResume(AgentExecutionContext execCtx, PauseState state) {
+        if (traceStore == null || !enableTrace) return;
+        RunnableParams params = state.getParams();
+        String conversationId = params != null ? params.getConversationId() : null;
+        execCtx.setSessionId(state.getSessionId());
+        execCtx.setTraceManager(new TraceManager(traceStore, state.getSessionId(), conversationId));
+        execCtx.restoreTokens(state.getTotalPromptTokens(), state.getTotalCompletionTokens());
+    }
+
+    /**
+     * 记录一次 LLM 调用 trace（成功）。
+     */
+    private void recordTrace(AgentExecutionContext execCtx, int round, String requestJson,
+                             String outputData, String think,
+                             long promptTokens, long completionTokens, long durationMs) {
+        execCtx.accumulateTokens(promptTokens, completionTokens);
+        log.debug("[TRACE] round={}, prompt={}, completion={}, totalPrompt={}, totalCompletion={}",
+                round, promptTokens, completionTokens,
+                execCtx.getTotalPromptTokens(), execCtx.getTotalCompletionTokens());
+        TraceManager tm = execCtx.getTraceManager();
+        if (tm == null) return;
+        tm.trace(round, requestJson, outputData, think,
+                (int) promptTokens, (int) completionTokens, durationMs);
+    }
+
+    /**
+     * 将工具调用列表序列化为 JSON，用作 trace 的 outputData。
+     */
+    private String serializeToolCalls(List<AssistantMessage.ToolCall> toolCalls) {
+        try {
+            var list = toolCalls.stream().map(tc -> {
+                Map<String, Object> map = new LinkedHashMap<>();
+                map.put("id", tc.id());
+                map.put("type", tc.type());
+                map.put("name", tc.name());
+                map.put("arguments", tc.arguments());
+                return map;
+            }).toList();
+            return objectMapper.writeValueAsString(Map.of("tool_calls", list));
+        } catch (Exception e) {
+            log.debug("[TraceStore] Failed to serialize tool calls: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 从非流式 ChatResponse 中提取 promptTokens / completionTokens。
+     */
+    private long[] extractUsage(ChatResponse response) {
+        if (response != null && response.getMetadata() != null && response.getMetadata().getUsage() != null) {
+            var usage = response.getMetadata().getUsage();
+            return new long[]{usage.getPromptTokens(), usage.getCompletionTokens()};
+        }
+        return new long[]{0, 0};
     }
 
     /**
@@ -276,6 +402,7 @@ public class AgentLoopExecutor {
         List<Message> messages = messageBuilder.buildInitialMessages(query, params);
         Sinks.Many<AgentStreamEvent> sink = Sinks.many().unicast().onBackpressureBuffer();
         AgentExecutionContext execCtx = new AgentExecutionContext(query, params);
+        initTrace(execCtx, params);
         AtomicLong roundCounter = new AtomicLong(0);
 
         scheduleRound(messages, sink, roundCounter, params, execCtx, query);
@@ -302,14 +429,13 @@ public class AgentLoopExecutor {
             return new AgentResult.Paused(pauseHolder[0]);
         }
 
-        // 同步完成入库（不经过 wrapStreamFlux 的 doFinally）
-        String conversationId = params != null ? params.getConversationId() : null;
-        String userId = params != null ? params.getUserId() : null;
-        messageBuilder.saveToChatMemory(query, answer.toString(), think.length() > 0 ? think.toString() : null, conversationId, userId);
-        memoryPersistor.persist(params, query, answer.toString(), conversationId);
+        String finalAnswer = answer.toString();
+        if (params != null && params.getOutputType() != null) {
+            finalAnswer = JsonRepairUtil.fixJson(finalAnswer);
+        }
 
         return new AgentResult.Completed(
-                answer.toString(),
+                finalAnswer,
                 think.length() > 0 ? think.toString() : null,
                 stageOutputs);
     }
@@ -332,51 +458,74 @@ public class AgentLoopExecutor {
             toolCallExecutor.addNormalToolMessage(toolCall, result, messages);
         }
 
-        return runLoop(messages, state.getCurrentRound() + 1, state.getParams(),
-                state.getQuery());
+        String conversationId = state.getParams() != null ? state.getParams().getConversationId() : null;
+        if (taskManager != null && conversationId != null) {
+            if (taskManager.registerTask(conversationId, null) == null) {
+                return new AgentResult.Failed("该会话正在执行中，请稍后再试: " + conversationId,
+                        AgentErrorCode.CONCURRENT_EXECUTION);
+            }
+        }
+        try {
+            return runLoopWithResume(messages, state.getCurrentRound() + 1, state.getParams(),
+                    state.getQuery(), state);
+        } finally {
+            if (taskManager != null && conversationId != null) {
+                taskManager.removeTask(conversationId);
+            }
+        }
     }
 
     /**
-     * 统一的 ReAct 循环。
+     * 带恢复 sessionId 的 ReAct 循环。
+     * state != null 表示恢复执行，state == null 表示新会话。
      */
-    private AgentResult runLoop(List<Message> messages, int startRound,
-                                RunnableParams params, String query) {
+    private AgentResult runLoopWithResume(List<Message> messages, int startRound,
+                                          RunnableParams params, String query, PauseState state) {
         try {
-            return doRunLoop(messages, startRound, params, query);
+            AgentResult result = doRunLoopInternal(messages, startRound, params, query, state);
+            return result;
         } catch (AgentException e) {
             return new AgentResult.Failed(e.getMessage(), e.getCode());
         }
     }
 
-    private AgentResult doRunLoop(List<Message> messages, int startRound,
-                                  RunnableParams params, String query) {
+    /**
+     * doRunLoop 的内部实现，支持传入 PauseState（恢复时）。
+     * state == null 表示新会话。
+     */
+    private AgentResult doRunLoopInternal(List<Message> messages, int startRound,
+                                          RunnableParams params, String query, PauseState state) {
         AgentExecutionContext execCtx = new AgentExecutionContext(query, params);
+        if (state != null) {
+            initTraceFromResume(execCtx, state);
+        } else {
+            initTrace(execCtx, params);
+        }
         Map<String, Object> stageOutputs = new HashMap<>();
 
         for (int round = startRound; round < maxRounds; round++) {
             log.debug("Agent loop round: {}", round);
 
-            // 上下文压缩（每轮 LLM 调用前执行）
             if (contextCompactor != null) {
                 contextCompactor.compact(messages, query);
             }
 
+            long startTime = System.currentTimeMillis();
             ChatClientResponse ccResponse = llmInvoker.callLlm(messages);
+            long durationMs = System.currentTimeMillis() - startTime;
 
             ChatResponse response = ccResponse.chatResponse();
 
             List<AssistantMessage.ToolCall> toolCalls = response.getResult().getOutput().getToolCalls();
 
             if (toolCalls != null && !toolCalls.isEmpty()) {
-                // 校验并修复不合法的 tool call arguments，防止后续 API 调用 400
                 List<AssistantMessage.ToolCall> rawCalls = toolCalls;
                 toolCalls = toolCallExecutor.sanitizeToolCalls(rawCalls);
+                long[] usage = extractUsage(response);
 
                 if (toolCalls == rawCalls) {
-                    // 全部合法，直接使用原始 AssistantMessage（保留子类型如 DeepSeekAssistantMessage）
                     messages.add(response.getResult().getOutput());
                 } else {
-                    // arguments 被修复过，构建新的 AssistantMessage
                     AssistantMessage original = response.getResult().getOutput();
                     messages.add(AssistantMessage.builder()
                             .content(original.getText())
@@ -384,11 +533,9 @@ public class AgentLoopExecutor {
                             .build());
                 }
 
-                // === 暂停检查 (PauseAdvisor 通过 context 标记) ===
                 if (Boolean.TRUE.equals(ccResponse.context().get(PauseAdvisor.PAUSE_REQUIRED))) {
                     List<PendingToolCall> pending = PauseAdvisor.getPendingTools(ccResponse.context());
 
-                    // 执行非拦截工具
                     toolCallExecutor.executeNonPendingTools(toolCalls, pending, messages, params);
 
                     PauseState pauseState = PauseState.builder()
@@ -397,23 +544,55 @@ public class AgentLoopExecutor {
                             .pendingToolCalls(pending)
                             .params(params)
                             .query(query)
+                            .sessionId(execCtx.getSessionId())
+                            .totalPromptTokens(execCtx.getTotalPromptTokens())
+                            .totalCompletionTokens(execCtx.getTotalCompletionTokens())
                             .build();
+
+                    String requestJson = ccResponse.context() != null
+                            ? (String) ccResponse.context().get(RequestLoggingAdvisor.LLM_REQUEST_JSON) : null;
+                    recordTrace(execCtx, round + 1, requestJson, serializeToolCalls(toolCalls),
+                            null, usage[0], usage[1], durationMs);
 
                     log.debug("Agent paused at round {}, pending tools: {}", round, pending.size());
                     return new AgentResult.Paused(pauseState);
                 }
+
+                String requestJson = ccResponse.context() != null
+                        ? (String) ccResponse.context().get(RequestLoggingAdvisor.LLM_REQUEST_JSON) : null;
+                recordTrace(execCtx, round + 1, requestJson, serializeToolCalls(toolCalls),
+                        null, usage[0], usage[1], durationMs);
 
                 toolCallExecutor.executeToolCallsWithStage(toolCalls, messages, params, execCtx, stageOutputs);
                 log.debug("Tool calls executed: {}, continuing to next round", toolCalls.size());
                 continue;
             }
 
+            // 最终答案轮 trace
+            String finalReqJson = ccResponse.context() != null
+                    ? (String) ccResponse.context().get(RequestLoggingAdvisor.LLM_REQUEST_JSON) : null;
+            String finalThink = thinkingMode == ThinkingMode.REASONING_CONTENT
+                    ? thinkingModeProcessor.extractReasoningContent(response.getResult().getOutput())
+                    : thinkingModeProcessor.extractThinkContent(response.getResult().getOutput().getText());
+            long[] finalUsage = extractUsage(response);
+            recordTrace(execCtx, round + 1, finalReqJson, response.getResult().getOutput().getText(),
+                    finalThink, finalUsage[0], finalUsage[1], durationMs);
+
             return completeWithAnswer(response, execCtx, stageOutputs, params, query);
         }
 
-        // 达到最大轮次，强制生成最终答案
         ChatResponse forced = forceFinalAnswer(messages, params);
+        long[] forcedUsage = extractUsage(forced);
+        execCtx.accumulateTokens(forcedUsage[0], forcedUsage[1]);
         return completeWithAnswer(forced, execCtx, stageOutputs, params, query);
+    }
+
+    /**
+     * 统一的 ReAct 循环。
+     */
+    private AgentResult runLoop(List<Message> messages, int startRound,
+                                RunnableParams params, String query) {
+        return runLoopWithResume(messages, startRound, params, query, null);
     }
 
     /**
@@ -477,7 +656,7 @@ public class AgentLoopExecutor {
         }
         messageBuilder.saveToChatMemory(query, cleanAnswer, think, conversationId, userId);
 
-        memoryPersistor.persist(params, query, answer, conversationId);
+        memoryPersistor.persist(params, query, cleanAnswer, conversationId);
     }
 
     /**
@@ -503,6 +682,7 @@ public class AgentLoopExecutor {
 
         // AgentStart + AFTER_START providers
         AgentExecutionContext execCtx = new AgentExecutionContext(query, params);
+        initTrace(execCtx, params);
         sink.tryEmitNext(new AgentStreamEvent.AgentStart());
         if (!stageManager.isEmpty()) {
             stageManager.afterStart(execCtx.toStageContext(), sink::tryEmitNext);
@@ -537,11 +717,21 @@ public class AgentLoopExecutor {
         }
 
         String conversationId = state.getParams() != null ? state.getParams().getConversationId() : null;
+
+        if (taskManager != null && conversationId != null) {
+            AgentTaskManager.TaskInfo taskInfo = taskManager.registerTask(conversationId, null);
+            if (taskInfo == null) {
+                return Flux.error(new AgentException(AgentErrorCode.CONCURRENT_EXECUTION,
+                        "该会话正在执行中，请稍后再试: " + conversationId));
+            }
+        }
+
         Sinks.Many<AgentStreamEvent> sink = Sinks.many().unicast().onBackpressureBuffer();
 
         String query = state.getQuery();
-        AtomicLong roundCounter = new AtomicLong(state.getCurrentRound() + 1);
+        AtomicLong roundCounter = new AtomicLong(state.getCurrentRound());
         AgentExecutionContext execCtx = new AgentExecutionContext(query, state.getParams());
+        initTraceFromResume(execCtx, state);
         Disposable disposable = scheduleRound(messages, sink, roundCounter, state.getParams(), execCtx, query);
 
         if (taskManager != null && conversationId != null && disposable != null) {
@@ -552,64 +742,40 @@ public class AgentLoopExecutor {
     }
 
     /**
-     * 为流式 Flux 统一添加 buffer 收集、完成、取消、错误处理。
+     * 为流式 Flux 统一添加错误处理和清理。
+     *
+     * <p>注意：save 逻辑（chatMemory + memoryPersistor）已移到 finishRound / forceFinalStream 中，
+     * 在 tryEmitComplete() 之前执行，避免 doFinally 时序问题导致 JVM 退出时数据丢失。
      */
     private Flux<AgentStreamEvent> wrapStreamFlux(Sinks.Many<AgentStreamEvent> sink,
                                                   String conversationId,
                                                   AtomicLong roundCounter,
                                                   RunnableParams params,
                                                   String query) {
-        StringBuilder textBuffer = new StringBuilder();
-        StringBuilder thinkingBuffer = new StringBuilder();
-
         return sink.asFlux()
-                .doOnNext(event -> {
-                    if (event instanceof AgentStreamEvent.Text t) {
-                        textBuffer.append(t.content());
-                    } else if (event instanceof AgentStreamEvent.Thinking t) {
-                        thinkingBuffer.append(t.content());
-                    }
-                })
                 .doOnError(err -> handleStreamError(conversationId, err))
                 .doFinally(signal -> {
-                    log.info("Stream terminated: conversationId={}, signal={}, textLength={}, thinkingLength={}",
-                            conversationId, signal, textBuffer.length(), thinkingBuffer.length());
-                    if (signal != SignalType.ON_ERROR) {
-                        handleStreamComplete(conversationId, roundCounter.get(), params, query,
-                                textBuffer.toString(), thinkingBuffer.toString());
+                    log.debug("Stream terminated: conversationId={}, signal={}", conversationId, signal);
+                    if (taskManager != null && conversationId != null) {
+                        taskManager.stopTask(conversationId);
                     }
                 });
     }
 
-    private void handleStreamCancel(String conversationId) {
-        log.info("\n\n Stream cancelled: conversationId={}", conversationId);
-        if (taskManager != null && conversationId != null) {
-            taskManager.removeTask(conversationId);
-        }
-    }
-
-    private void handleStreamComplete(String conversationId, long round,
-                                      RunnableParams params, String query, String answer, String think) {
-        log.info("Stream completed: conversationId={}, round={}", conversationId, round);
-
-        // 自动写入会话历史（answer 正文 + think 思考过程）
-        if (conversationId != null) {
-            messageBuilder.saveToChatMemory(query, answer, think, conversationId, params != null ? params.getUserId() : null);
-        }
-
-        // 长期记忆提取 + 语义记忆保存（MemoryPersistor 内部 stripThinkTags）
+    /**
+     * 流式完成时保存会话历史和长期记忆（在 tryEmitComplete 之前调用，避免 doFinally 时序问题）。
+     */
+    private void saveStreamHistory(String conversationId, RunnableParams params,
+                                   String query, String answer, String think) {
+        if (conversationId == null) return;
+        messageBuilder.saveToChatMemory(query, answer, think, conversationId,
+                params != null ? params.getUserId() : null);
         memoryPersistor.persist(params, query, answer, conversationId);
-
-        if (taskManager != null && conversationId != null) {
-            taskManager.removeTask(conversationId);
-        }
     }
 
     private void handleStreamError(String conversationId, Throwable err) {
         log.error("\n\n Stream error: conversationId={}", conversationId, err);
-        if (taskManager != null && conversationId != null) {
-            taskManager.removeTask(conversationId);
-        }
+        // 清理统一由 doFinally → stopTask 处理，避免提前 remove 导致内层 Disposable 无法 dispose
     }
 
     private Disposable scheduleRound(List<Message> messages, Sinks.Many<AgentStreamEvent> sink,
@@ -626,6 +792,7 @@ public class AgentLoopExecutor {
         log.debug("Scheduling round: {}, conversationId={}, retryAttempt={}", round, conversationId, retryAttempt);
 
         RoundState roundState = new RoundState();
+        long startTime = System.currentTimeMillis();
 
         // 上下文压缩（每轮 LLM 调用前执行）
         if (contextCompactor != null) {
@@ -635,13 +802,32 @@ public class AgentLoopExecutor {
         return llmInvoker.buildRoundChatClient().prompt()
                 .messages(messages)
                 .stream()
-                .chatResponse()
+                .chatClientResponse()
                 .publishOn(Schedulers.boundedElastic())
-                .doOnNext(chunk -> processChunk(chunk, sink, roundState))
-                .doOnComplete(() -> finishRound(messages, sink, roundState, roundCounter, params, execCtx, query))
-                .onErrorResume(err -> llmInvoker.handleStreamError(err, retryAttempt, sink,
-                        () -> scheduleRound(messages, sink, roundCounter, params, execCtx, query, retryAttempt + 1),
-                        "LLM stream error"))
+                .doOnNext(ccResp -> {
+                    // 捕获 Advisor chain context（PauseAdvisor 在聚合响应中设置 PAUSE_REQUIRED）
+                    Map<String, Object> ctx = ccResp.context();
+                    if (ctx != null && !ctx.isEmpty()) {
+                        roundState.advisorContext = ctx;
+                    }
+                    // 跳过 PauseAdvisor 聚合响应，避免重复处理 tool calls
+                    if (ctx == null || !Boolean.TRUE.equals(ctx.get(PauseAdvisor.PAUSE_REQUIRED))) {
+                        ChatResponse chunk = ccResp.chatResponse();
+                        if (chunk != null) {
+                            processChunk(chunk, sink, roundState);
+                        }
+                    }
+                })
+                .doOnComplete(() -> {
+                    long durationMs = System.currentTimeMillis() - startTime;
+                    finishRound(messages, sink, roundState, roundCounter, params, execCtx, query, durationMs);
+                })
+                .onErrorResume(err -> {
+                    llmInvoker.handleStreamError(err, retryAttempt, sink,
+                            () -> scheduleRound(messages, sink, roundCounter, params, execCtx, query, retryAttempt + 1),
+                            "LLM stream error");
+                    return Flux.empty();
+                })
                 .subscribe();
     }
 
@@ -688,11 +874,14 @@ public class AgentLoopExecutor {
 
     private void finishRound(List<Message> messages, Sinks.Many<AgentStreamEvent> sink,
                              RoundState state, AtomicLong roundCounter, RunnableParams params,
-                             AgentExecutionContext execCtx, String query) {
+                             AgentExecutionContext execCtx, String query, long durationMs) {
         String conversationId = params != null ? params.getConversationId() : null;
+        int round = (int) roundCounter.get();
+        String requestJson = state.advisorContext != null
+                ? (String) state.advisorContext.get(RequestLoggingAdvisor.LLM_REQUEST_JSON) : null;
 
         if (state.promptTokens >= 0 || state.finishReason != null) {
-            log.info("LLM response detail: conversationId={}, promptTokens={}, completionTokens={}, finishReason={}",
+            log.debug("LLM response detail: conversationId={}, promptTokens={}, completionTokens={}, finishReason={}",
                     conversationId, state.promptTokens, state.completionTokens, state.finishReason);
         }
 
@@ -707,6 +896,14 @@ public class AgentLoopExecutor {
                         .build());
             }
 
+            // 记录 trace（最终答案轮）
+            String think = state.reasoningBuffer.length() > 0 ? state.reasoningBuffer.toString() : null;
+            recordTrace(execCtx, round, requestJson, state.textBuffer.toString(),
+                    think, state.promptTokens, state.completionTokens, durationMs);
+
+            // 保存会话历史 + 长期记忆（在 tryEmitComplete 之前，避免 doFinally 时序问题）
+            saveStreamHistory(conversationId, params, query, state.textBuffer.toString(), think);
+
             // BEFORE_COMPLETE providers + Complete 事件
             if (execCtx != null) {
                 execCtx.setAnswer(state.textBuffer.toString());
@@ -714,10 +911,11 @@ public class AgentLoopExecutor {
                     stageManager.beforeComplete(execCtx.toStageContext(), sink::tryEmitNext);
                 }
             }
-            EmitResult completeResult = sink.tryEmitNext(new AgentStreamEvent.Complete());
+            EmitResult completeResult = sink.tryEmitNext(new AgentStreamEvent.Complete(
+                    execCtx.getTotalPromptTokens(), execCtx.getTotalCompletionTokens()));
             log.debug("tryEmitNext(Complete) result={}, conversationId={}", completeResult, conversationId);
             EmitResult emitResult = sink.tryEmitComplete();
-            log.warn("tryEmitComplete result={}, conversationId={}", emitResult, conversationId);
+            log.debug("tryEmitComplete result={}, conversationId={}", emitResult, conversationId);
             return;
         }
 
@@ -735,21 +933,45 @@ public class AgentLoopExecutor {
 
         if (maxRounds > 0 && roundCounter.get() >= maxRounds) {
             log.debug("Max rounds reached, forcing final answer: conversationId={}", conversationId);
-            forceFinalStream(messages, sink, params, execCtx);
+            // 记录 trace（工具调用轮，达到上限）
+            recordTrace(execCtx, round, requestJson, serializeToolCalls(safeToolCalls), null,
+                    state.promptTokens, state.completionTokens, durationMs);
+            forceFinalStream(messages, sink, params, execCtx, query);
             return;
         }
 
-        // === 流式暂停检查 ===
-        // 流式路径中，PauseAdvisor 不会在 context 中标记（streaming advisor 不同）
-        // 直接检查 PauseAdvisor 是否配置了拦截
-        PauseCheckResult pauseCheck = checkStreamPause(safeToolCalls, messages, params,
-                (int) roundCounter.get(), query);
-        if (pauseCheck.isPaused()) {
-            sink.tryEmitNext(new AgentStreamEvent.Paused(pauseCheck.state()));
-            sink.tryEmitNext(new AgentStreamEvent.Complete());
+        // === 流式暂停检查（通过 Advisor chain context） ===
+        if (state.advisorContext != null
+                && Boolean.TRUE.equals(state.advisorContext.get(PauseAdvisor.PAUSE_REQUIRED))) {
+            List<PendingToolCall> pending = PauseAdvisor.getPendingTools(state.advisorContext);
+
+            // 执行非拦截工具
+            toolCallExecutor.executeNonPendingTools(safeToolCalls, pending, messages, params);
+
+            PauseState pauseState = PauseState.builder()
+                    .messages(List.copyOf(messages))
+                    .currentRound((int) roundCounter.get())
+                    .pendingToolCalls(pending)
+                    .params(params)
+                    .query(query)
+                    .sessionId(execCtx.getSessionId())
+                    .totalPromptTokens(execCtx.getTotalPromptTokens())
+                    .totalCompletionTokens(execCtx.getTotalCompletionTokens())
+                    .build();
+
+            // 记录 trace（暂停前）
+            recordTrace(execCtx, round, requestJson, serializeToolCalls(safeToolCalls), null,
+                    state.promptTokens, state.completionTokens, durationMs);
+
+            log.debug("Stream paused at round {}, pending tools: {}", roundCounter.get(), pending.size());
+            sink.tryEmitNext(new AgentStreamEvent.Paused(pauseState));
             sink.tryEmitComplete();
             return;
         }
+
+        // 记录 trace（工具调用轮）
+        recordTrace(execCtx, round, requestJson, serializeToolCalls(safeToolCalls), null,
+                state.promptTokens, state.completionTokens, durationMs);
 
         // 发射 ToolStart 事件
         for (AssistantMessage.ToolCall tc : safeToolCalls) {
@@ -759,63 +981,6 @@ public class AgentLoopExecutor {
         toolCallExecutor.executeToolCallsAsync(sink, safeToolCalls, messages, params, execCtx, () -> {
             scheduleRound(messages, sink, roundCounter, params, execCtx, query);
         });
-    }
-
-    /**
-     * 流式路径的暂停检查。
-     * 通过检查 ChatClient 的 Advisor 链中是否有 PauseAdvisor，
-     * 判断当前 toolCalls 中是否有需要拦截的工具。
-     */
-    private PauseCheckResult checkStreamPause(List<AssistantMessage.ToolCall> toolCalls,
-                                              List<Message> messages,
-                                              RunnableParams params,
-                                              int round,
-                                              String query) {
-        if (pauseAdvisor == null) {
-            return PauseCheckResult.notPaused();
-        }
-
-        List<PendingToolCall> pending = new ArrayList<>();
-        for (AssistantMessage.ToolCall tc : toolCalls) {
-            if (pauseAdvisor.shouldIntercept(tc.name())) {
-                pending.add(new PendingToolCall(tc.id(), tc.name(), tc.arguments()));
-            }
-        }
-
-        if (pending.isEmpty()) {
-            return PauseCheckResult.notPaused();
-        }
-
-        // 执行非拦截工具
-        toolCallExecutor.executeNonPendingTools(toolCalls, pending, messages, params);
-
-        PauseState pauseState = PauseState.builder()
-                .messages(List.copyOf(messages))
-                .currentRound(round)
-                .pendingToolCalls(pending)
-                .params(params)
-                .query(query)
-                .build();
-
-        log.debug("Stream paused at round {}, pending tools: {}", round, pending.size());
-        return PauseCheckResult.paused(pauseState);
-    }
-
-    /**
-     * 暂停检查结果。
-     */
-    private record PauseCheckResult(boolean paused, PauseState state) {
-        static PauseCheckResult notPaused() {
-            return new PauseCheckResult(false, null);
-        }
-
-        static PauseCheckResult paused(PauseState state) {
-            return new PauseCheckResult(true, state);
-        }
-
-        boolean isPaused() {
-            return paused;
-        }
     }
 
     private void mergeToolCall(RoundState state, AssistantMessage.ToolCall incoming) {
@@ -842,26 +1007,41 @@ public class AgentLoopExecutor {
     private ChatResponse forceFinalAnswer(List<Message> messages, RunnableParams params) {
         List<Message> newMessages = new ArrayList<>(messages);
 
-        newMessages.add(new SystemMessage(PromptConstants.MAX_ROUNDS_REACHED));
-
+        // 修复闭合最后一轮未执行的 tool_calls
+        if (!newMessages.isEmpty() && newMessages.get(newMessages.size() - 1) instanceof AssistantMessage lastMsg) {
+            if (lastMsg.getToolCalls() != null && !lastMsg.getToolCalls().isEmpty()) {
+                for (AssistantMessage.ToolCall tc : lastMsg.getToolCalls()) {
+                    // 构造空的或提示触顶的 ToolMessage 喂给 LLM 满足格式要求
+                    toolCallExecutor.addNormalToolMessage(tc, "Agent maximum rounds reached. Tool execution skipped.", newMessages);
+                }
+            }
+        }
         ChatClientResponse ccResponse = llmInvoker.callLlm(newMessages);
 
         return ccResponse.chatResponse();
     }
 
     private void forceFinalStream(List<Message> messages, Sinks.Many<AgentStreamEvent> sink,
-                                  RunnableParams params, AgentExecutionContext execCtx) {
-        forceFinalStream(messages, sink, params, execCtx, 0);
+                                  RunnableParams params, AgentExecutionContext execCtx, String query) {
+        forceFinalStream(messages, sink, params, execCtx, query, 0);
     }
 
     private void forceFinalStream(List<Message> messages, Sinks.Many<AgentStreamEvent> sink,
-                                  RunnableParams params, AgentExecutionContext execCtx, int retryAttempt) {
+                                  RunnableParams params, AgentExecutionContext execCtx, String query, int retryAttempt) {
         List<Message> newMessages = new ArrayList<>(messages);
 
-        newMessages.add(new SystemMessage(PromptConstants.MAX_ROUNDS_REACHED));
+        // 闭合最后一轮未执行的 tool_calls
+        if (!newMessages.isEmpty() && newMessages.get(newMessages.size() - 1) instanceof AssistantMessage lastMsg) {
+            if (lastMsg.getToolCalls() != null && !lastMsg.getToolCalls().isEmpty()) {
+                for (AssistantMessage.ToolCall tc : lastMsg.getToolCalls()) {
+                    toolCallExecutor.addNormalToolMessage(tc, "Agent maximum rounds reached. Tool execution skipped.", newMessages);
+                }
+            }
+        }
 
         StringBuilder answerBuffer = new StringBuilder();
         boolean[] inThink = {false};
+        final long[] finalUsage = {0, 0};
 
         llmInvoker.buildRoundChatClient().prompt()
                 .messages(newMessages)
@@ -870,6 +1050,13 @@ public class AgentLoopExecutor {
                 .publishOn(Schedulers.boundedElastic())
                 .doOnNext(chunk -> {
                     String text = chunk.getResult().getOutput().getText();
+
+                    // 捕获 token 用量（最后一个 chunk 包含）
+                    if (chunk.getMetadata() != null && chunk.getMetadata().getUsage() != null) {
+                        var usage = chunk.getMetadata().getUsage();
+                        finalUsage[0] = usage.getPromptTokens();
+                        finalUsage[1] = usage.getCompletionTokens();
+                    }
 
                     if (thinkingMode == ThinkingMode.REASONING_CONTENT) {
                         String reasoning = thinkingModeProcessor.extractReasoningContent(chunk.getResult().getOutput());
@@ -880,18 +1067,24 @@ public class AgentLoopExecutor {
                     thinkingModeProcessor.processForceFinalChunk(text, inThink, answerBuffer, sink);
                 })
                 .doOnComplete(() -> {
-                    // BEFORE_COMPLETE providers + Complete
+                    String conversationId = params != null ? params.getConversationId() : null;
+                    // 累加 forceFinal 轮的 token
+                    execCtx.accumulateTokens(finalUsage[0], finalUsage[1]);
+                    // BEFORE_COMPLETE providers + save + Complete
                     if (execCtx != null) {
                         execCtx.setAnswer(answerBuffer.toString());
                         if (!stageManager.isEmpty()) {
                             stageManager.beforeComplete(execCtx.toStageContext(), sink::tryEmitNext);
                         }
                     }
-                    sink.tryEmitNext(new AgentStreamEvent.Complete());
+                    // 保存会话历史 + 长期记忆（在 tryEmitComplete 之前）
+                    saveStreamHistory(conversationId, params, query, answerBuffer.toString(), null);
+                    sink.tryEmitNext(new AgentStreamEvent.Complete(
+                            execCtx.getTotalPromptTokens(), execCtx.getTotalCompletionTokens()));
                     sink.tryEmitComplete();
                 })
                 .onErrorResume(err -> llmInvoker.handleStreamError(err, retryAttempt, sink,
-                        () -> forceFinalStream(messages, sink, params, execCtx, retryAttempt + 1),
+                        () -> forceFinalStream(messages, sink, params, execCtx, query, retryAttempt + 1),
                         "forceFinal stream error"))
                 .subscribe();
     }

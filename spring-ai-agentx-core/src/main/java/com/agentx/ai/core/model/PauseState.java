@@ -30,6 +30,9 @@ public class PauseState {
     private final List<PendingToolCall> pendingToolCalls;
     private final RunnableParams params;
     private final String query;
+    private final long sessionId;
+    private final long totalPromptTokens;
+    private final long totalCompletionTokens;
 
     private PauseState(Builder builder) {
         this.messages = builder.messages;
@@ -37,6 +40,9 @@ public class PauseState {
         this.pendingToolCalls = builder.pendingToolCalls;
         this.params = builder.params;
         this.query = builder.query;
+        this.sessionId = builder.sessionId;
+        this.totalPromptTokens = builder.totalPromptTokens;
+        this.totalCompletionTokens = builder.totalCompletionTokens;
     }
 
     public List<Message> getMessages() {
@@ -59,6 +65,18 @@ public class PauseState {
         return query;
     }
 
+    public long getSessionId() {
+        return sessionId;
+    }
+
+    public long getTotalPromptTokens() {
+        return totalPromptTokens;
+    }
+
+    public long getTotalCompletionTokens() {
+        return totalCompletionTokens;
+    }
+
     public static Builder builder() {
         return new Builder();
     }
@@ -69,6 +87,9 @@ public class PauseState {
         private List<PendingToolCall> pendingToolCalls;
         private RunnableParams params;
         private String query;
+        private long sessionId;
+        private long totalPromptTokens;
+        private long totalCompletionTokens;
 
         public Builder messages(List<Message> messages) {
             this.messages = messages;
@@ -92,6 +113,21 @@ public class PauseState {
 
         public Builder query(String query) {
             this.query = query;
+            return this;
+        }
+
+        public Builder sessionId(long sessionId) {
+            this.sessionId = sessionId;
+            return this;
+        }
+
+        public Builder totalPromptTokens(long totalPromptTokens) {
+            this.totalPromptTokens = totalPromptTokens;
+            return this;
+        }
+
+        public Builder totalCompletionTokens(long totalCompletionTokens) {
+            this.totalCompletionTokens = totalCompletionTokens;
             return this;
         }
 

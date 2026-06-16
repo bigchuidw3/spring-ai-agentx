@@ -17,7 +17,7 @@ import java.util.Objects;
 public class DataSourceMemoryStore {
 
     private final DataSource dataSource;
-    private boolean profileMemoryEnabled = true;
+    private boolean enableProfileMemory = true;
 
     public DataSourceMemoryStore(DataSource dataSource) {
         Objects.requireNonNull(dataSource, "dataSource must not be null");
@@ -33,8 +33,8 @@ public class DataSourceMemoryStore {
      * @param enabled true 启用（默认），false 禁用
      * @return this
      */
-    public DataSourceMemoryStore profileMemoryEnabled(boolean enabled) {
-        this.profileMemoryEnabled = enabled;
+    public DataSourceMemoryStore enableProfileMemory(boolean enabled) {
+        this.enableProfileMemory = enabled;
         return this;
     }
 
@@ -43,6 +43,6 @@ public class DataSourceMemoryStore {
     }
 
     public boolean isLongTermMemoryEnabled() {
-        return profileMemoryEnabled;
+        return enableProfileMemory;
     }
 }

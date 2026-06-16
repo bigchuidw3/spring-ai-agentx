@@ -25,19 +25,19 @@ public class MemoryInjector {
 
     private final MemoryStore memoryStore;
     private final SemanticMemoryManager semanticMemoryManager;
-    private final boolean profileMemoryEnabled;
+    private final boolean enableProfileMemory;
 
-    public MemoryInjector(MemoryStore memoryStore, SemanticMemoryManager semanticMemoryManager, boolean profileMemoryEnabled) {
+    public MemoryInjector(MemoryStore memoryStore, SemanticMemoryManager semanticMemoryManager, boolean enableProfileMemory) {
         this.memoryStore = memoryStore;
         this.semanticMemoryManager = semanticMemoryManager;
-        this.profileMemoryEnabled = profileMemoryEnabled;
+        this.enableProfileMemory = enableProfileMemory;
     }
 
     /**
      * 构建用户画像注入的提示词区块。
      */
     public String buildMemorySection(RunnableParams params) {
-        if (!profileMemoryEnabled || memoryStore == null || params == null || params.getUserId() == null) {
+        if (!enableProfileMemory || memoryStore == null || params == null || params.getUserId() == null) {
             return "";
         }
 
