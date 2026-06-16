@@ -35,6 +35,8 @@ Spring AI AgentX 是一款面向 Java 开发者的 AI Agent 开发框架。基�
 | 功能 | 说明 |
 |------|------|
 | TodoWrite 任务追踪 | 结构化任务列表工具，流式 TodoProgress 进度事件，保证多步骤任务不遗漏 |
+| TraceAudit 追踪审计 | 基于 `agentx_trace` 表记录每轮 LLM 调用请求/响应/Token，提供大模型调用链路审计和问题追溯 |
+| SubAgent 子代理 | 主 Agent 委派任务给专门的子 Agent，独立 context window，流式事件转发，自动 trace 审计 |
 
 ### v1.0.0-M1
 
