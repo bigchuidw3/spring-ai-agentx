@@ -151,7 +151,8 @@ public class SubAgentTool {
             case AgentStreamEvent.TodoProgress e -> new AgentStreamEvent.TodoProgress(e.items(), source);
             case AgentStreamEvent.StageOutput e -> new AgentStreamEvent.StageOutput(e.stage(), e.data(), source);
             case AgentStreamEvent.Error e -> new AgentStreamEvent.Error(e.code(), e.message(), e.detail(), source);
-            case AgentStreamEvent.Complete e -> new AgentStreamEvent.Complete(e.totalPromptTokens(), e.totalCompletionTokens(), source);
+            case AgentStreamEvent.Complete e -> new AgentStreamEvent.Complete(
+                    e.totalPromptTokens(), e.totalCompletionTokens(), source);
             default -> event;
         };
     }

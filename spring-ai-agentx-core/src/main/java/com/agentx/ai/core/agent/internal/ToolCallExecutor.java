@@ -5,6 +5,7 @@ import com.agentx.ai.core.model.PendingToolCall;
 import com.agentx.ai.core.model.RunnableParams;
 import com.agentx.ai.core.stage.AgentExecutionContext;
 import com.agentx.ai.core.stage.StageOutputManager;
+import com.agentx.ai.core.timeline.TimelineCollector;
 import com.agentx.ai.core.tools.TodoWriteTool;
 import com.alibaba.fastjson2.JSON;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -185,8 +186,14 @@ public class ToolCallExecutor {
                                 sink.tryEmitNext(new AgentStreamEvent.ToolEnd(
                                         detail.toolCall.name(), detail.toolCall.id(), detail.rawResult));
 
+                                // 时间线收集：工具完成
+                                if (execCtx != null) {
+                                    execCtx.getTimelineCollector().onToolEnd(detail.toolCall.id(), detail.rawResult);
+                                }
+
                                 // TodoWrite 进度事件
-                                emitTodoProgressIfNeeded(detail.toolCall.name(), detail.toolCall.arguments(), sink);
+                                emitTodoProgressIfNeeded(detail.toolCall.name(), detail.toolCall.arguments(),
+                                        sink, execCtx != null ? execCtx.getTimelineCollector() : null);
 
                                 if (execCtx != null) {
                                     execCtx.addToolRecord(detail.toolCall.name(), detail.toolCall.id(),
@@ -353,13 +360,18 @@ public class ToolCallExecutor {
         return APPROVAL_KEYWORDS.contains(userResponse.trim().toLowerCase());
     }
 
-    private void emitTodoProgressIfNeeded(String toolName, String arguments, Sinks.Many<AgentStreamEvent> sink) {
+    private void emitTodoProgressIfNeeded(String toolName, String arguments,
+                                           Sinks.Many<AgentStreamEvent> sink,
+                                           TimelineCollector collector) {
         if (!"TodoWrite".equals(toolName)) {
             return;
         }
         try {
             List<TodoWriteTool.TodoItem> items = JSON.parseObject(arguments).getList("todos", TodoWriteTool.TodoItem.class);
             sink.tryEmitNext(new AgentStreamEvent.TodoProgress(items));
+            if (collector != null) {
+                collector.onTodoProgress(items);
+            }
         } catch (Exception e) {
             log.warn("解析 TodoWrite 参数失败，跳过 TodoProgress 事件: {}", e.getMessage());
         }

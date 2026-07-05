@@ -127,12 +127,37 @@ public class JsonRepairUtil {
         text = text.replace("“", "\"").replace("”", "\"");
         text = text.replace("‘", "'").replace("’", "'");
 
-        // 将单引号替换为双引号（JSON 标准要求双引号）
-        // 只替换 JSON 结构位置的单引号（紧跟 : [ { , 之后），避免误替换字符串值内部的单引号
-        // 例如：不能把 "提出了'重构'这一概念" 中的单引号替换掉
-        text = text.replaceAll("([: \\[\\{,]\\s*)'([^']*?)'(?=\\s*[:,\\]}])", "$1\"$2\"");
-
-        return text;
+        // 将 JSON 结构位置的单引号替换为双引号（JSON 标准要求双引号）
+        // 关键：必须跳过"双引号字符串值内部"的单引号，否则会破坏内容
+        // 例如 "代码中调用 $_SERVER['REQUEST_METHOD']" 里的单引号绝不能动
+        // 正则无法稳定追踪字符串边界，这里用状态机按字符扫描
+        StringBuilder sb = new StringBuilder(text.length());
+        boolean inString = false;  // 是否处于双引号字符串内部
+        boolean escape = false;    // 当前字符是否被反斜杠转义（仅字符串内有效）
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (inString) {
+                sb.append(c);
+                if (escape) {
+                    escape = false;
+                } else if (c == '\\') {
+                    escape = true;
+                } else if (c == '"') {
+                    inString = false;
+                }
+            } else {
+                if (c == '"') {
+                    inString = true;
+                    sb.append(c);
+                } else if (c == '\'') {
+                    // 双引号字符串外部的单引号视为 JSON 结构性引号，替换为双引号
+                    sb.append('"');
+                } else {
+                    sb.append(c);
+                }
+            }
+        }
+        return sb.toString();
     }
 
     /**
@@ -217,6 +242,18 @@ public class JsonRepairUtil {
             log.error("JSON 美化失败", e);
             return jsonString;
         }
+    }
+
+    public static void main(String[] args) {
+        System.out.println(fixJson("{\n" +
+                "  \"verdict\": \"clean\",\n" +
+                "  \"confidence\": 0.82,\n" +
+                "  \"threat_type\": null,\n" +
+                "  \"conclusion\": \"代码为普通 PHP 文件上传接收脚本，仅打印上传文件名，不存在恶意行为或 WebShell 特征。\",\n" +
+                "  \"technical_details\": \"代码结构分析：\\n1. 混淆检测：无任何混淆手段，代码为明文可读 PHP。\\n2. 危险行为检测：\\n   - 代码仅定义了上传目录变量 $upload_dir = \\\"/tmp/uploads/\\\"，但未实际使用该变量进行任何文件写入、移动或执行操作；\\n   - 通过 $_SERVER['REQUEST_METHOD'] 判断请求方法为 POST 后，仅执行 echo 输出 $_FILES['file']['name']（文件名字符串），无文件落地、无代码执行、无命令执行；\\n   - 无 eval、exec、system、passthru、popen、proc_open、assert、preg_replace /e 等任何危险函数调用；\\n   - 无动态代码生成、无网络外联、无持久化操作。\\n3. 整体语义：该脚本功能极为有限，仅回显上传文件名，不具备 WebShell 的核心能力（代码执行/命令执行/文件写入）。\\n4. 注意点：$upload_dir 定义但未使用，可能为开发中的不完整代码；文件名直接拼接输出存在轻微 XSS 风险，但不构成服务器端 WebShell 威胁。\",\n" +
+                "  \"risk_assessment\": null,\n" +
+                "  \"recommendations\": \"1. 当前代码不构成 WebShell 威胁，可保留正常使用；\\n2. 建议对 $_FILES['file']['name'] 输出进行 htmlspecialchars() 转义，防止潜在的反射型 XSS；\\n3. 若后续补全文件上传落地逻辑，需严格校验文件类型（白名单）、重命名文件、禁止上传可执行脚本，并确保上传目录不可被 Web 直接访问；\\n4. 建议结合 WAF 对上传接口进行防护。\"\n" +
+                "}"));
     }
 }
 

@@ -3,6 +3,7 @@ package com.agentx.ai.core.agent.internal;
 import com.agentx.ai.core.model.AgentStreamEvent;
 import com.agentx.ai.core.model.ThinkingMode;
 import com.agentx.ai.core.stage.ThinkTagParser;
+import com.agentx.ai.core.timeline.TimelineCollector;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import reactor.core.publisher.Sinks;
 
@@ -36,24 +37,25 @@ public final class ThinkingModeProcessor {
 
     /**
      * 处理流式 chunk 中的文本内容，根据 ThinkingMode 发射对应事件。
-     * 替代 AgentLoopExecutor.processChunk 中的三模式分支（DISABLED / THINK_TAG / REASONING_CONTENT）。
      *
-     * @param text  chunk 文本内容
-     * @param state 轮次状态（inThink、textBuffer、reasoningBuffer）
-     * @param sink  事件接收器
+     * @param text      chunk 文本内容
+     * @param state     轮次状态（inThink、textBuffer、reasoningBuffer）
+     * @param sink      事件接收器
+     * @param collector 时间线收集器（同步合并碎片）
      */
-    public void processStreamChunk(String text, RoundState state, Sinks.Many<AgentStreamEvent> sink) {
+    public void processStreamChunk(String text, RoundState state,
+                                   Sinks.Many<AgentStreamEvent> sink,
+                                   TimelineCollector collector) {
         if (thinkingMode == ThinkingMode.REASONING_CONTENT) {
-            // reasoning_content 在 processChunk 中通过 metadata 单独提取，此处仅处理 text
             if (text != null && !text.isEmpty()) {
                 state.textBuffer.append(text);
                 sink.tryEmitNext(new AgentStreamEvent.Text(text));
+                collector.onText(text);
             }
         } else if (thinkingMode == ThinkingMode.THINK_TAG) {
-            processThinkTagChunk(text, state, sink, true);
+            processThinkTagChunk(text, state, sink, collector, true);
         } else {
-            // DISABLED：剥离 think 标签，不输出 Thinking 事件
-            processThinkTagChunk(text, state, sink, false);
+            processThinkTagChunk(text, state, sink, collector, false);
         }
     }
 
@@ -63,36 +65,41 @@ public final class ThinkingModeProcessor {
      * @param reasoning reasoning_content 文本
      * @param state     轮次状态
      * @param sink      事件接收器
+     * @param collector 时间线收集器
      */
-    public void processReasoningChunk(String reasoning, RoundState state, Sinks.Many<AgentStreamEvent> sink) {
+    public void processReasoningChunk(String reasoning, RoundState state,
+                                      Sinks.Many<AgentStreamEvent> sink,
+                                      TimelineCollector collector) {
         if (reasoning != null && !reasoning.isEmpty()) {
             state.reasoningBuffer.append(reasoning);
             sink.tryEmitNext(new AgentStreamEvent.Thinking(reasoning));
+            collector.onThinking(reasoning);
         }
     }
 
     /**
      * 处理 forceFinal 场景中的流式 chunk。
-     * 替代 AgentLoopExecutor.forceFinalStream 中的三模式分支。
      *
      * @param text          chunk 文本内容
      * @param inThinkHolder inThink 状态持有者（单元素数组）
      * @param answerBuffer  答案累积器
      * @param sink          事件接收器
+     * @param collector     时间线收集器
      */
     public void processForceFinalChunk(String text, boolean[] inThinkHolder,
                                        StringBuilder answerBuffer,
-                                       Sinks.Many<AgentStreamEvent> sink) {
+                                       Sinks.Many<AgentStreamEvent> sink,
+                                       TimelineCollector collector) {
         if (thinkingMode == ThinkingMode.REASONING_CONTENT) {
-            // REASONING_CONTENT 模式：reasoning 由调用方单独处理，此处仅处理 text
             if (text != null && !text.isEmpty()) {
                 answerBuffer.append(text);
                 sink.tryEmitNext(new AgentStreamEvent.Text(text));
+                collector.onText(text);
             }
         } else if (thinkingMode == ThinkingMode.THINK_TAG) {
-            processForceFinalThinkTag(text, inThinkHolder, answerBuffer, sink, true);
+            processForceFinalThinkTag(text, inThinkHolder, answerBuffer, sink, collector, true);
         } else {
-            processForceFinalThinkTag(text, inThinkHolder, answerBuffer, sink, false);
+            processForceFinalThinkTag(text, inThinkHolder, answerBuffer, sink, collector, false);
         }
     }
 
@@ -132,7 +139,6 @@ public final class ThinkingModeProcessor {
      * 反射结果已缓存，避免重复查找。
      */
     public String extractReasoningContent(AssistantMessage msg) {
-        // 1. metadata 路径（OpenAI 兼容通用路径）
         Map<String, Object> metadata = msg.getMetadata();
         if (metadata != null) {
             Object rc = metadata.get("reasoningContent");
@@ -144,7 +150,6 @@ public final class ThinkingModeProcessor {
             }
         }
 
-        // 2. 反射路径（DeepSeekAssistantMessage 等子类）
         Class<?> msgClass = msg.getClass();
         try {
             if (cachedReasoningMethod == null || cachedReasoningClass != msgClass) {
@@ -152,7 +157,6 @@ public final class ThinkingModeProcessor {
                     cachedReasoningMethod = msgClass.getMethod("getReasoningContent");
                     cachedReasoningClass = msgClass;
                 } catch (NoSuchMethodException e) {
-                    // 标记该类无此方法，后续跳过反射
                     cachedReasoningClass = null;
                     return null;
                 }
@@ -195,6 +199,7 @@ public final class ThinkingModeProcessor {
 
     private void processThinkTagChunk(String text, RoundState state,
                                       Sinks.Many<AgentStreamEvent> sink,
+                                      TimelineCollector collector,
                                       boolean emitThinkingEvents) {
         if (text == null || text.isEmpty()) {
             return;
@@ -205,11 +210,13 @@ public final class ThinkingModeProcessor {
             if (seg.thinking()) {
                 if (emitThinkingEvents) {
                     sink.tryEmitNext(new AgentStreamEvent.Thinking(seg.content()));
+                    collector.onThinking(seg.content());
                 }
                 state.textBuffer.append(seg.content());
             } else {
                 state.textBuffer.append(seg.content());
                 sink.tryEmitNext(new AgentStreamEvent.Text(seg.content()));
+                collector.onText(seg.content());
             }
         }
     }
@@ -217,6 +224,7 @@ public final class ThinkingModeProcessor {
     private void processForceFinalThinkTag(String text, boolean[] inThinkHolder,
                                            StringBuilder answerBuffer,
                                            Sinks.Many<AgentStreamEvent> sink,
+                                           TimelineCollector collector,
                                            boolean emitThinkingEvents) {
         if (text == null || text.isEmpty()) {
             return;
@@ -227,11 +235,13 @@ public final class ThinkingModeProcessor {
             if (seg.thinking()) {
                 if (emitThinkingEvents) {
                     sink.tryEmitNext(new AgentStreamEvent.Thinking(seg.content()));
+                    collector.onThinking(seg.content());
                 }
                 answerBuffer.append(seg.content());
             } else {
                 answerBuffer.append(seg.content());
                 sink.tryEmitNext(new AgentStreamEvent.Text(seg.content()));
+                collector.onText(seg.content());
             }
         }
     }

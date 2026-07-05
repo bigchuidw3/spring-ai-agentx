@@ -2,7 +2,6 @@ package com.agentx.ai.core.agent.internal;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.ai.chat.model.ChatResponse;
 import reactor.core.Disposable;
 import reactor.core.publisher.Sinks;
 
@@ -25,16 +24,17 @@ public class AgentTaskManager {
     private final Map<String, TaskInfo> taskMap = new ConcurrentHashMap<>();
 
     public static class TaskInfo {
-        private final Sinks.Many<ChatResponse> sink;
+        // 通配类型
+        private final Sinks.Many<?> sink;
         private volatile Disposable disposable;
         private final long createTime;
 
-        TaskInfo(Sinks.Many<ChatResponse> sink) {
+        TaskInfo(Sinks.Many<?> sink) {
             this.sink = sink;
             this.createTime = System.currentTimeMillis();
         }
 
-        public Sinks.Many<ChatResponse> getSink() {
+        public Sinks.Many<?> getSink() {
             return sink;
         }
 
@@ -51,7 +51,7 @@ public class AgentTaskManager {
         }
     }
 
-    public TaskInfo registerTask(String conversationId, Sinks.Many<ChatResponse> sink) {
+    public TaskInfo registerTask(String conversationId, Sinks.Many<?> sink) {
         TaskInfo newTask = new TaskInfo(sink);
         TaskInfo existing = taskMap.putIfAbsent(conversationId, newTask);
         if (existing != null) {

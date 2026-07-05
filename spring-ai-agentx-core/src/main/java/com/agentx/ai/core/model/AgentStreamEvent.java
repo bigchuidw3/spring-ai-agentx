@@ -162,10 +162,25 @@ public sealed interface AgentStreamEvent permits
      *
      * @param totalPromptTokens     整个对话总输入 token 数
      * @param totalCompletionTokens 整个对话总输出 token 数
+     * @param conversationId        会话 ID（主 Agent 才填，子 Agent 透传时丢弃；可为 null）
+     * @param sessionId             本次执行对应的 agentx_session 主键 ID（主 Agent 才填；
+     *                              可用于关联文件、外部资源等；为 null 表示未启用会话存储）
      * @param source                事件来源（null 表示主 Agent）
      */
-    record Complete(long totalPromptTokens, long totalCompletionTokens, SubAgentSource source) implements AgentStreamEvent {
-        public Complete(long totalPromptTokens, long totalCompletionTokens) { this(totalPromptTokens, totalCompletionTokens, null); }
-        public Complete() { this(0, 0, null); }
+    record Complete(long totalPromptTokens,
+                    long totalCompletionTokens,
+                    String conversationId,
+                    Long sessionId,
+                    SubAgentSource source) implements AgentStreamEvent {
+        /** 兼容旧调用：仅 tokens + source */
+        public Complete(long totalPromptTokens, long totalCompletionTokens, SubAgentSource source) {
+            this(totalPromptTokens, totalCompletionTokens, null, null, source);
+        }
+        /** 兼容旧调用：仅 tokens */
+        public Complete(long totalPromptTokens, long totalCompletionTokens) {
+            this(totalPromptTokens, totalCompletionTokens, null, null, null);
+        }
+        /** 兼容旧调用：默认空 */
+        public Complete() { this(0, 0, null, null, null); }
     }
 }

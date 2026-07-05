@@ -46,14 +46,15 @@ public class FileSystemTools {
     private static final String EMPTY_CONTENT_WARNING = "System reminder: File exists but has empty contents";
 
     private final Path cwd;
+    private final List<Path> allowedRoots;
     private final boolean virtualMode;
     private final long maxFileSizeBytes;
 
     /**
-     * 默认构造函数，使用当前工作目录。
+     * 默认构造函数，无目录约束，使用 JVM 当前工作目录。
      */
     public FileSystemTools() {
-        this(null, false, DEFAULT_MAX_FILE_SIZE_MB);
+        this((List<String>) null, false, DEFAULT_MAX_FILE_SIZE_MB);
     }
 
     /**
@@ -62,13 +63,36 @@ public class FileSystemTools {
      * @param rootDir 文件操作的根目录（可选）
      * @param virtualMode 为 true 时，将传入路径视为 cwd 下的虚拟绝对路径
      * @param maxFileSizeMb 读取操作的最大文件大小（MB）
+     * @deprecated 用 {@link #FileSystemTools(List, boolean, int)} 或 {@link Builder#allowedDirs(String...)}，
+     * 单目录等价于 allowedDirs([rootDir])。
      */
+    @Deprecated
     public FileSystemTools(String rootDir, boolean virtualMode, int maxFileSizeMb) {
-        this.cwd = rootDir != null ? Paths.get(rootDir).toAbsolutePath().normalize() : Paths.get("").toAbsolutePath();
+        this(rootDir != null ? List.of(rootDir) : null, virtualMode, maxFileSizeMb);
+    }
+
+    /**
+     * 核心构造函数。
+     *
+     * @param allowedDirs 允许访问的目录集合（null 或空表示无约束，向后兼容）；
+     *                    非空时所有文件操作被限制在这些目录树内，第一个目录同时作为相对路径基准
+     * @param virtualMode 为 true 时，将传入路径视为 cwd 下的虚拟绝对路径
+     * @param maxFileSizeMb 读取操作的最大文件大小（MB）
+     */
+    public FileSystemTools(List<String> allowedDirs, boolean virtualMode, int maxFileSizeMb) {
+        if (allowedDirs != null && !allowedDirs.isEmpty()) {
+            this.allowedRoots = allowedDirs.stream()
+                    .map(p -> Paths.get(p).toAbsolutePath().normalize())
+                    .collect(Collectors.toUnmodifiableList());
+            this.cwd = this.allowedRoots.get(0);
+        } else {
+            this.allowedRoots = List.of();
+            this.cwd = Paths.get("").toAbsolutePath();
+        }
         this.virtualMode = virtualMode;
         this.maxFileSizeBytes = (long) maxFileSizeMb * 1024L * 1024L;
-        logger.debug("FileSystemTools initialized: cwd={}, virtualMode={}, maxFileSize={}MB",
-                cwd, virtualMode, maxFileSizeMb);
+        logger.debug("FileSystemTools initialized: cwd={}, allowedRoots={}, virtualMode={}, maxFileSize={}MB",
+                cwd, allowedRoots, virtualMode, maxFileSizeMb);
     }
 
     /**
@@ -98,10 +122,16 @@ public class FileSystemTools {
 
         // 非虚拟模式：支持绝对路径和相对路径
         Path resolvedPath = Paths.get(path);
-        if (resolvedPath.isAbsolute()) {
-            return resolvedPath.normalize();
+        Path full = resolvedPath.isAbsolute()
+                ? resolvedPath.normalize()
+                : cwd.resolve(resolvedPath).normalize();
+
+        // 若设置了允许目录集合，强制边界校验（命中任一允许目录即可）
+        if (!allowedRoots.isEmpty() && allowedRoots.stream().noneMatch(full::startsWith)) {
+            throw new IllegalArgumentException(
+                    "权限不足：路径 '" + path + "' 不在允许访问的目录内：" + allowedRoots);
         }
-        return cwd.resolve(resolvedPath).normalize();
+        return full;
     }
 
     // @formatter:off
@@ -629,6 +659,14 @@ public class FileSystemTools {
                 searchRoot = cwd;
             }
 
+            // 边界校验：若设置了允许目录，searchRoot 必须落在任一允许目录内
+            // （绝对路径 glob 和 ".." 逃逸都会在此被拦截）
+            if (!allowedRoots.isEmpty() && allowedRoots.stream().noneMatch(searchRoot::startsWith)) {
+                logger.warn("Glob search root outside allowed directories: {} (allowed: {})",
+                        searchRoot, allowedRoots);
+                return matchedFiles;
+            }
+
             if (!Files.exists(searchRoot)) {
                 logger.warn("Glob search root does not exist: {}", searchRoot);
                 return matchedFiles;
@@ -684,7 +722,7 @@ public class FileSystemTools {
     }
 
     /**
-     * 创建文件系统工具的 ToolCallback 数组（默认配置）
+     * 创建文件系统工具的 ToolCallback 数组（默认配置，无目录约束）
      *
      * 这是一个便捷方法，使用默认配置创建工具实例。
      *
@@ -692,6 +730,31 @@ public class FileSystemTools {
      */
     public static ToolCallback[] create() {
         return ToolCallbacks.from(new FileSystemTools());
+    }
+
+    /**
+     * 创建限定在指定目录集合内的文件系统工具。
+     *
+     * <p>设置后所有文件操作（read_file/write_file/edit_file/list_files/glob_files）将被限制在这些目录树内，
+     * 超出范围返回"权限不足"错误。第一个目录同时作为相对路径的基准（相对路径会解析到该目录下）。
+     *
+     * <p>示例：
+     * <pre>{@code
+     * // 限定单个目录
+     * FileSystemTools.create("/data/project")
+     *
+     * // 限定多个目录
+     * FileSystemTools.create("/data/project", "/tmp/output")
+     * }</pre>
+     *
+     * @param allowedDirs 允许访问的目录（可变参数）；为空等价于 {@link #create()}（无约束）
+     * @return ToolCallback 数组
+     */
+    public static ToolCallback[] create(String... allowedDirs) {
+        if (allowedDirs == null || allowedDirs.length == 0) {
+            return create();
+        }
+        return ToolCallbacks.from(new FileSystemTools(Arrays.asList(allowedDirs), false, DEFAULT_MAX_FILE_SIZE_MB));
     }
 
     /**
@@ -707,18 +770,35 @@ public class FileSystemTools {
      * Builder 模式用于配置 FileSystemTools。
      */
     public static class Builder {
-        private String rootDir;
+        private List<String> allowedDirs;
         private boolean virtualMode = false;
         private int maxFileSizeMb = DEFAULT_MAX_FILE_SIZE_MB;
 
         /**
-         * 设置根目录。
+         * 设置根目录（单目录便捷方法）。
          *
          * @param rootDir 根目录路径
          * @return this
+         * @deprecated 用 {@link #allowedDirs(String...)}，等价于 allowedDirs(rootDir)。
          */
+        @Deprecated
         public Builder rootDir(String rootDir) {
-            this.rootDir = rootDir;
+            this.allowedDirs = rootDir != null ? List.of(rootDir) : null;
+            return this;
+        }
+
+        /**
+         * 设置允许访问的目录集合（可变参数）。
+         *
+         * <p>设置后所有文件操作被限制在这些目录树内，超出范围返回权限错误。
+         * 第一个目录同时作为相对路径的基准。不调用本方法表示无约束（向后兼容）。
+         *
+         * @param allowedDirs 允许访问的目录
+         * @return this
+         */
+        public Builder allowedDirs(String... allowedDirs) {
+            this.allowedDirs = (allowedDirs != null && allowedDirs.length > 0)
+                    ? Arrays.asList(allowedDirs) : null;
             return this;
         }
 
@@ -750,7 +830,7 @@ public class FileSystemTools {
          * @return FileSystemTools 实例
          */
         public FileSystemTools build() {
-            return new FileSystemTools(rootDir, virtualMode, maxFileSizeMb);
+            return new FileSystemTools(allowedDirs, virtualMode, maxFileSizeMb);
         }
     }
 

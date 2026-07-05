@@ -120,22 +120,49 @@ public class LoopMessageBuilder {
 
     /**
      * 保存会话历史到 ChatMemory。
+     *
+     * @param query        用户问题
+     * @param answer       助手回答（正文）
+     * @param think        思考过程（可为 null）
+     * @param timelineJson 时间线 JSON（可为 null）
+     * @param conversationId 会话 ID
+     * @param userId       用户标识（可为 null）
      */
-    public void saveToChatMemory(String query, String answer, String think,
+    public void saveToChatMemory(String query, String answer, String think, String timelineJson,
                                  String conversationId, String userId) {
+        saveToChatMemory(query, answer, think, timelineJson, conversationId, userId, 0L);
+    }
+
+    /**
+     * 保存会话历史到 ChatMemory，并显式传入 sessionId。
+     * <p>
+     * sessionId 用于让 agentx_session 主键与外部上下文（trace、文件关联等）对齐。
+     * 非 {@link AgentChatMemory} 实现的 ChatMemory 会忽略 sessionId。
+     *
+     * @param query        用户问题
+     * @param answer       助手回答（正文）
+     * @param think        思考过程（可为 null）
+     * @param timelineJson 时间线 JSON（可为 null）
+     * @param conversationId 会话 ID
+     * @param userId       用户标识（可为 null）
+     * @param sessionId    预生成的 agentx_session 主键 ID；为 0 时由底层自动生成
+     */
+    public void saveToChatMemory(String query, String answer, String think, String timelineJson,
+                                 String conversationId, String userId, long sessionId) {
         if (!enableSession || chatMemory == null || conversationId == null || query == null || query.isEmpty()) {
             return;
         }
         try {
             if (chatMemory instanceof AgentChatMemory acm) {
-                acm.add(conversationId, userId, query, answer, think);
+                acm.add(conversationId, userId, query, answer, think, timelineJson, sessionId);
             } else {
                 chatMemory.add(conversationId, List.of(
                         new UserMessage(query),
                         new AssistantMessage(answer)
                 ));
             }
-            log.debug("Saved conversation to agentx_session: conversationId={}, userId={}", conversationId, userId);
+            log.debug("Saved conversation to agentx_session: conversationId={}, userId={}, sessionId={}",
+                    conversationId, userId, sessionId);
         } catch (Exception e) {
             log.error("Failed to save conversation to agentx_session: {}", e.getMessage());
         }

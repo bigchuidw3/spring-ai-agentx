@@ -23,7 +23,7 @@ import static com.agentx.ai.core.utils.ToolMergeUtil.mergeTools;
  * 所有记忆层和技能系统协同工作。
  *
  * @author bigchui
- * 
+ *
  */
 public class FullIntegrationTest {
 
@@ -73,9 +73,9 @@ public class FullIntegrationTest {
 
         System.out.println("--- 会话 1：自我介绍 + 使用 skill ---");
         TestConfig.streamAndPrint(agent,
-                "我叫bigchui，我是大模型智能体开发者，正在当前目录下做 Spring AI WZ项目。"
+                "我叫bigchui，我是大模型智能体开发者，正在当前目录下做 Spring AI项目。"
                         + "查看并分析当前目录的项目内容和主要功能，帮我在当前目录创建一个 readme.md，" +
-                        "内容简要介绍这个 Spring AI WZ 框架的核心功能，简要描述。",
+                        "内容简要介绍这个 Spring AI 框架的核心功能，简要描述。",
                 params1);
 
         // 等待异步记忆提取 + 语义存储
@@ -89,7 +89,7 @@ public class FullIntegrationTest {
         System.out.println("--- 会话 2（新会话，验证记忆注入）---");
         TestConfig.streamAndPrint(agent,
                 "你知道我是谁吗？我在做什么项目？"
-                        + "请用 ppt skill 帮我做一个关于 Spring AI WZ 框架的 5 页介绍 PPT，直接展示内容，不要封面和目录。",
+                        + "请用 ppt skill 帮我做一个关于 Spring AI 框架的 5 页介绍 PPT，直接展示内容，不要封面和目录。",
                 params2);
 
         System.out.println(">>> 完整集成测试完成：记忆（画像+语义）+ Skills + 工具 全部协同工作。");

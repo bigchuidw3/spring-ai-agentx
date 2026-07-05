@@ -17,6 +17,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -36,14 +37,16 @@ public class GrepTool {
     private static final boolean DEFAULT_CASE_SENSITIVE = false;
     private static final int DEFAULT_CONTEXT_LINES = 0;
 
+    private final Path cwd;
+    private final List<Path> allowedRoots;
     private final boolean useRipgrep;
     private final Charset charset;
 
     /**
-     * 默认构造函数，自动检测 ripgrep
+     * 默认构造函数，自动检测 ripgrep，无目录约束。
      */
     public GrepTool() {
-        this(StandardCharsets.UTF_8);
+        this(StandardCharsets.UTF_8, null);
     }
 
     /**
@@ -52,6 +55,26 @@ public class GrepTool {
      * @param charset 文件编码
      */
     public GrepTool(Charset charset) {
+        this(charset, null);
+    }
+
+    /**
+     * 核心构造函数。
+     *
+     * @param charset 文件编码
+     * @param allowedDirs 允许搜索的目录集合（null 或空表示无约束，向后兼容）；
+     *                    非空时搜索路径被限制在这些目录树内，第一个目录同时作为相对路径基准
+     */
+    public GrepTool(Charset charset, List<String> allowedDirs) {
+        if (allowedDirs != null && !allowedDirs.isEmpty()) {
+            this.allowedRoots = allowedDirs.stream()
+                    .map(p -> Paths.get(p).toAbsolutePath().normalize())
+                    .collect(Collectors.toUnmodifiableList());
+            this.cwd = this.allowedRoots.get(0);
+        } else {
+            this.allowedRoots = List.of();
+            this.cwd = Paths.get("").toAbsolutePath();
+        }
         this.charset = charset;
         this.useRipgrep = checkRipgrepAvailable();
         if (useRipgrep) {
@@ -62,14 +85,48 @@ public class GrepTool {
     }
 
     /**
-     * 创建 Grep 工具的 ToolCallback 数组（默认配置）
-     *
-     * 这是一个便捷方法，使用默认配置创建工具实例。
+     * 创建 Grep 工具的 ToolCallback 数组（默认配置，无目录约束）
      *
      * @return ToolCallback 数组，包含 grep 工具
      */
     public static ToolCallback[] create() {
         return ToolCallbacks.from(new GrepTool());
+    }
+
+    /**
+     * 创建限定在指定目录集合内的 Grep 工具。
+     *
+     * <p>设置后所有搜索（grep）将被限制在这些目录树内，超出范围返回"权限不足"错误。
+     * 第一个目录同时作为相对路径的基准。
+     *
+     * @param allowedDirs 允许搜索的目录（可变参数）；为空等价于 {@link #create()}（无约束）
+     * @return ToolCallback 数组
+     */
+    public static ToolCallback[] create(String... allowedDirs) {
+        if (allowedDirs == null || allowedDirs.length == 0) {
+            return create();
+        }
+        return ToolCallbacks.from(new GrepTool(StandardCharsets.UTF_8, Arrays.asList(allowedDirs)));
+    }
+
+    /**
+     * 解析搜索路径并进行边界校验。
+     *
+     * @param rawPath 原始路径参数（null/空视为当前目录）
+     * @return 解析后的绝对路径
+     * @throws IllegalArgumentException 若设置了允许目录且路径越界
+     */
+    private Path resolveSearchPath(String rawPath) {
+        String p = (rawPath == null || rawPath.trim().isEmpty()) ? "." : rawPath;
+        Path resolved = Paths.get(p);
+        Path full = resolved.isAbsolute()
+                ? resolved.normalize()
+                : cwd.resolve(resolved).normalize();
+        if (!allowedRoots.isEmpty() && allowedRoots.stream().noneMatch(full::startsWith)) {
+            throw new IllegalArgumentException(
+                    "权限不足：搜索路径 '" + rawPath + "' 不在允许访问的目录内：" + allowedRoots);
+        }
+        return full;
     }
 
     /**
@@ -134,7 +191,6 @@ public class GrepTool {
 
         // 可选参数设置默认值，防止 LLM 不传时 NPE
         if (outputMode == null || outputMode.isEmpty()) outputMode = "content";
-        if (path == null || path.isEmpty()) path = ".";
         boolean ignoreCaseVal = Boolean.TRUE.equals(ignoreCase);
         int beforeContextVal = beforeContext != null ? beforeContext : DEFAULT_CONTEXT_LINES;
         int afterContextVal = afterContext != null ? afterContext : DEFAULT_CONTEXT_LINES;
@@ -142,11 +198,12 @@ public class GrepTool {
         int offsetVal = offset != null ? offset : 0;
 
         try {
+            Path searchPath = resolveSearchPath(path);
             if (useRipgrep) {
-                return searchWithRipgrep(pattern, path, glob, outputMode,
+                return searchWithRipgrep(pattern, searchPath, glob, outputMode,
                     beforeContextVal, afterContextVal, ignoreCaseVal, headLimitVal, offsetVal);
             } else {
-                return searchWithJava(pattern, path, glob, outputMode,
+                return searchWithJava(pattern, searchPath, glob, outputMode,
                     beforeContextVal, afterContextVal, ignoreCaseVal, headLimitVal, offsetVal);
             }
         } catch (Exception e) {
@@ -160,7 +217,7 @@ public class GrepTool {
      */
     private String searchWithRipgrep(
             String pattern,
-            String path,
+            Path searchPath,
             String glob,
             String outputMode,
             int beforeContext,
@@ -175,10 +232,8 @@ public class GrepTool {
         // 添加模式
         command.add(pattern);
 
-        // 添加路径
-        if (path != null && !path.isEmpty()) {
-            command.add(path);
-        }
+        // 添加路径（已解析并校验过的绝对路径）
+        command.add(searchPath.toString());
 
         // 添加 glob 过滤
         if (glob != null && !glob.isEmpty()) {
@@ -244,7 +299,7 @@ public class GrepTool {
      */
     private String searchWithJava(
             String pattern,
-            String path,
+            Path searchPath,
             String glob,
             String outputMode,
             int beforeContext,
@@ -253,9 +308,8 @@ public class GrepTool {
             int headLimit,
             int offset) throws IOException {
 
-        Path searchPath = Paths.get(path);
         if (!Files.exists(searchPath)) {
-            return "Error: Path does not exist: " + path;
+            return "Error: Path does not exist: " + searchPath;
         }
 
         // 编译正则表达式

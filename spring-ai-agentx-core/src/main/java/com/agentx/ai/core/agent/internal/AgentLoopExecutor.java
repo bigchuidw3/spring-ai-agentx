@@ -17,6 +17,8 @@ import com.agentx.ai.core.model.ThinkingMode;
 import com.agentx.ai.core.stage.AgentExecutionContext;
 import com.agentx.ai.core.stage.StageOutputManager;
 import com.agentx.ai.core.stage.ThinkTagParser;
+import com.agentx.ai.core.timeline.TimelineCollector;
+import com.agentx.ai.core.timeline.TimelineSerializer;
 import com.agentx.ai.core.utils.JsonRepairUtil;
 
 import com.agentx.ai.core.context.ContextCompactor;
@@ -318,15 +320,21 @@ public class AgentLoopExecutor {
     }
 
     /**
-     * 初始化 trace：生成 sessionId，创建 TraceManager 存入 execCtx。
-     * 仅在 traceStore 不为 null 且 enableTrace 时执行。
+     * 初始化执行上下文：始终生成 sessionId（作为本次执行的唯一标识，
+     * 用于 agentx_session 主键、文件关联、trace 等场景），并按需创建 TraceManager。
+     * <p>
+     * 注意：sessionId 生成不再依赖 trace 是否启用——trace 关闭时 sessionId 仍可用，
+     * 只是 TraceManager 不创建而已。
      */
     private void initTrace(AgentExecutionContext execCtx, RunnableParams params) {
+        // 始终生成 sessionId（即使 trace 未启用，会话存储与外部关联仍需要稳定 ID）
+        long sessionId = IdWorker.getId();
+        execCtx.setSessionId(sessionId);
+
+        // trace 仅在启用且具备存储条件时初始化（保持原有行为）
         if (traceStore == null || !enableTrace) return;
         String conversationId = params != null ? params.getConversationId() : null;
         if (conversationId == null) return;
-        long sessionId = IdWorker.getId();
-        execCtx.setSessionId(sessionId);
         execCtx.setTraceManager(new TraceManager(traceStore, sessionId, conversationId));
     }
 
@@ -390,6 +398,23 @@ public class AgentLoopExecutor {
     }
 
     /**
+     * 是否结构化输出（outputType != null）。
+     * 结构化输出场景最终 answer 必须纯净，think 也只取最终轮避免干扰。
+     */
+    private boolean isStructuredOutput(RunnableParams params) {
+        return params != null && params.getOutputType() != null;
+    }
+
+    /**
+     * 累积最终轮 think 并按 outputType 决定入库/返回值：
+     * 结构化输出只取最终轮（roundThink），非结构化取所有轮累积值。
+     */
+    private String resolveFinalThink(RunnableParams params, String roundThink, AgentExecutionContext execCtx) {
+        execCtx.accumulateThink(roundThink);
+        return isStructuredOutput(params) ? roundThink : execCtx.getAccumulatedThink();
+    }
+
+    /**
      * REASONING_CONTENT 模式：内部使用流式调用收集完整结果。
      *
      * <p>流式路径正确映射 reasoning_content 到 metadata（Thinking 事件），
@@ -419,6 +444,15 @@ public class AgentLoopExecutor {
                         case AgentStreamEvent.Thinking t -> think.append(t.content());
                         case AgentStreamEvent.StageOutput so -> stageOutputs.put(so.stage(), so.data());
                         case AgentStreamEvent.Paused p -> pauseHolder[0] = p.state();
+                        // 工具调用轮：该轮 Text 是思考性正文而非最终答案，
+                        // answer 始终清空（最终答案只保留最后一轮正文）；
+                        // think 仅结构化输出时清空（避免干扰），非结构化时累积所有轮思考
+                        case AgentStreamEvent.ToolStart ts -> {
+                            answer.setLength(0);
+                            if (isStructuredOutput(params)) {
+                                think.setLength(0);
+                            }
+                        }
                         default -> {
                         }
                     }
@@ -533,6 +567,10 @@ public class AgentLoopExecutor {
                             .build());
                 }
 
+                // 累积中间轮思考（用于非结构化输出时最终入库）
+                execCtx.accumulateThink(
+                        thinkingModeProcessor.extractThinkContent(response.getResult().getOutput().getText()));
+
                 if (Boolean.TRUE.equals(ccResponse.context().get(PauseAdvisor.PAUSE_REQUIRED))) {
                     List<PendingToolCall> pending = PauseAdvisor.getPendingTools(ccResponse.context());
 
@@ -606,19 +644,13 @@ public class AgentLoopExecutor {
         execCtx.setAnswer(answer);
         collectBeforeComplete(execCtx, stageOutputs);
 
-        // 分离 answer 和 think
-        String think;
-        doPostProcess(answer, assistantMessage, params, query);
-        if (thinkingMode == ThinkingMode.REASONING_CONTENT) {
-            think = thinkingModeProcessor.extractReasoningContent(assistantMessage);
-        } else {
-            think = thinkingModeProcessor.extractThinkContent(answer);
-        }
+        // 入库 think（含累积逻辑）由 doPostProcess 统一处理并返回最终 think
+        String finalThink = doPostProcess(answer, assistantMessage, params, query, execCtx);
         answer = thinkingModeProcessor.stripThinkTagsIfNeeded(answer);
         if (params != null && params.getOutputType() != null) {
             answer = JsonRepairUtil.fixJson(answer);
         }
-        return new AgentResult.Completed(answer, think, stageOutputs);
+        return new AgentResult.Completed(answer, finalThink, stageOutputs);
     }
 
     /**
@@ -637,26 +669,32 @@ public class AgentLoopExecutor {
 
     /**
      * 后处理：保存会话历史 + 长期记忆提取。
+     *
+     * @return 最终入库/返回用的 think（结构化输出只取最终轮，非结构化取所有轮累积值）
      */
-    private void doPostProcess(String answer, AssistantMessage assistantMessage, RunnableParams params, String query) {
+    private String doPostProcess(String answer, AssistantMessage assistantMessage, RunnableParams params,
+                                 String query, AgentExecutionContext execCtx) {
         String conversationId = params != null ? params.getConversationId() : null;
         String userId = params != null ? params.getUserId() : null;
 
         // 分离 think 和正文
         String cleanAnswer;
-        String think;
+        String roundThink;
         if (thinkingMode == ThinkingMode.REASONING_CONTENT) {
             // reasoning_content 模式：answer 已是纯正文，think 从消息中提取
             cleanAnswer = answer;
-            think = thinkingModeProcessor.extractReasoningContent(assistantMessage);
+            roundThink = thinkingModeProcessor.extractReasoningContent(assistantMessage);
         } else {
             // THINK_TAG 或 DISABLED：从 content 中分离
             cleanAnswer = ThinkTagParser.stripThinkTags(answer);
-            think = thinkingModeProcessor.extractThinkContent(answer);
+            roundThink = thinkingModeProcessor.extractThinkContent(answer);
         }
-        messageBuilder.saveToChatMemory(query, cleanAnswer, think, conversationId, userId);
+        // 入库 think：结构化输出只取最终轮（避免干扰），非结构化取所有轮累积值
+        String finalThink = resolveFinalThink(params, roundThink, execCtx);
+        messageBuilder.saveToChatMemory(query, cleanAnswer, finalThink, null, conversationId, userId);
 
         memoryPersistor.persist(params, query, cleanAnswer, conversationId);
+        return finalThink;
     }
 
     /**
@@ -673,7 +711,8 @@ public class AgentLoopExecutor {
         Sinks.Many<AgentStreamEvent> sink = Sinks.many().unicast().onBackpressureBuffer();
 
         if (taskManager != null && conversationId != null) {
-            AgentTaskManager.TaskInfo taskInfo = taskManager.registerTask(conversationId, null);
+            // 注册真正的 sink（非 null），让 stopTask 的 tryEmitComplete 能正常结束下游 Flux
+            AgentTaskManager.TaskInfo taskInfo = taskManager.registerTask(conversationId, sink);
             if (taskInfo == null) {
                 return Flux.error(new AgentException(AgentErrorCode.CONCURRENT_EXECUTION,
                         "该会话正在执行中，请稍后再试: " + conversationId));
@@ -689,11 +728,8 @@ public class AgentLoopExecutor {
         }
 
         AtomicLong roundCounter = new AtomicLong(0);
-        Disposable disposable = scheduleRound(messages, sink, roundCounter, params, execCtx, query);
-
-        if (taskManager != null && conversationId != null && disposable != null) {
-            taskManager.setDisposable(conversationId, disposable);
-        }
+        // disposable 的注册由 scheduleRound 内部每轮刷新负责，此处不再手动 setDisposable
+        scheduleRound(messages, sink, roundCounter, params, execCtx, query);
 
         return wrapStreamFlux(sink, conversationId, roundCounter, params, query);
     }
@@ -718,25 +754,23 @@ public class AgentLoopExecutor {
 
         String conversationId = state.getParams() != null ? state.getParams().getConversationId() : null;
 
+        Sinks.Many<AgentStreamEvent> sink = Sinks.many().unicast().onBackpressureBuffer();
+
         if (taskManager != null && conversationId != null) {
-            AgentTaskManager.TaskInfo taskInfo = taskManager.registerTask(conversationId, null);
+            // 注册真正的 sink（非 null），让 stopTask 的 tryEmitComplete 能正常结束下游 Flux
+            AgentTaskManager.TaskInfo taskInfo = taskManager.registerTask(conversationId, sink);
             if (taskInfo == null) {
                 return Flux.error(new AgentException(AgentErrorCode.CONCURRENT_EXECUTION,
                         "该会话正在执行中，请稍后再试: " + conversationId));
             }
         }
 
-        Sinks.Many<AgentStreamEvent> sink = Sinks.many().unicast().onBackpressureBuffer();
-
         String query = state.getQuery();
         AtomicLong roundCounter = new AtomicLong(state.getCurrentRound());
         AgentExecutionContext execCtx = new AgentExecutionContext(query, state.getParams());
         initTraceFromResume(execCtx, state);
-        Disposable disposable = scheduleRound(messages, sink, roundCounter, state.getParams(), execCtx, query);
-
-        if (taskManager != null && conversationId != null && disposable != null) {
-            taskManager.setDisposable(conversationId, disposable);
-        }
+        // disposable 的注册由 scheduleRound 内部每轮刷新负责，此处不再手动 setDisposable
+        scheduleRound(messages, sink, roundCounter, state.getParams(), execCtx, query);
 
         return wrapStreamFlux(sink, conversationId, roundCounter, state.getParams(), query);
     }
@@ -764,12 +798,15 @@ public class AgentLoopExecutor {
 
     /**
      * 流式完成时保存会话历史和长期记忆（在 tryEmitComplete 之前调用，避免 doFinally 时序问题）。
+     * <p>
+     * 显式传入 sessionId，使 agentx_session 主键与本次执行的 trace、文件关联等场景对齐。
      */
     private void saveStreamHistory(String conversationId, RunnableParams params,
-                                   String query, String answer, String think) {
+                                   String query, String answer, String think, String timelineJson,
+                                   long sessionId) {
         if (conversationId == null) return;
-        messageBuilder.saveToChatMemory(query, answer, think, conversationId,
-                params != null ? params.getUserId() : null);
+        messageBuilder.saveToChatMemory(query, answer, think, timelineJson, conversationId,
+                params != null ? params.getUserId() : null, sessionId);
         memoryPersistor.persist(params, query, answer, conversationId);
     }
 
@@ -799,7 +836,7 @@ public class AgentLoopExecutor {
             contextCompactor.compact(messages, query);
         }
 
-        return llmInvoker.buildRoundChatClient().prompt()
+        Disposable disposable = llmInvoker.buildRoundChatClient().prompt()
                 .messages(messages)
                 .stream()
                 .chatClientResponse()
@@ -814,7 +851,7 @@ public class AgentLoopExecutor {
                     if (ctx == null || !Boolean.TRUE.equals(ctx.get(PauseAdvisor.PAUSE_REQUIRED))) {
                         ChatResponse chunk = ccResp.chatResponse();
                         if (chunk != null) {
-                            processChunk(chunk, sink, roundState);
+                            processChunk(chunk, sink, roundState, execCtx);
                         }
                     }
                 })
@@ -824,14 +861,24 @@ public class AgentLoopExecutor {
                 })
                 .onErrorResume(err -> {
                     llmInvoker.handleStreamError(err, retryAttempt, sink,
+                            execCtx.getTimelineCollector(),
                             () -> scheduleRound(messages, sink, roundCounter, params, execCtx, query, retryAttempt + 1),
                             "LLM stream error");
                     return Flux.empty();
                 })
                 .subscribe();
+
+        // 每轮都把 taskManager 持有的 disposable 刷新为当前轮 subscription。
+        // 否则 stopTask 拿到的永远是第 1 轮（已完成、已 disposed）的 disposable，无法中断后续轮次。
+        // 本方法是向 taskManager 注册 disposable 的唯一入口（含递归重试 / forceFinalStream / resume）。
+        if (taskManager != null && conversationId != null) {
+            taskManager.setDisposable(conversationId, disposable);
+        }
+        return disposable;
     }
 
-    private void processChunk(ChatResponse chunk, Sinks.Many<AgentStreamEvent> sink, RoundState state) {
+    private void processChunk(ChatResponse chunk, Sinks.Many<AgentStreamEvent> sink,
+                              RoundState state, AgentExecutionContext execCtx) {
         if (chunk == null || chunk.getResult() == null || chunk.getResult().getOutput() == null) {
             return;
         }
@@ -865,11 +912,12 @@ public class AgentLoopExecutor {
         String text = chunk.getResult().getOutput().getText();
 
         // ThinkingMode 三模式分支：委托给 ThinkingModeProcessor
+        TimelineCollector collector = execCtx.getTimelineCollector();
         if (thinkingMode == ThinkingMode.REASONING_CONTENT) {
             String reasoning = thinkingModeProcessor.extractReasoningContent(chunk.getResult().getOutput());
-            thinkingModeProcessor.processReasoningChunk(reasoning, state, sink);
+            thinkingModeProcessor.processReasoningChunk(reasoning, state, sink, collector);
         }
-        thinkingModeProcessor.processStreamChunk(text, state, sink);
+        thinkingModeProcessor.processStreamChunk(text, state, sink, collector);
     }
 
     private void finishRound(List<Message> messages, Sinks.Many<AgentStreamEvent> sink,
@@ -896,13 +944,17 @@ public class AgentLoopExecutor {
                         .build());
             }
 
-            // 记录 trace（最终答案轮）
-            String think = state.reasoningBuffer.length() > 0 ? state.reasoningBuffer.toString() : null;
+            // 记录 trace（最终答案轮，trace 保持单轮 think）
+            String roundThink = state.reasoningBuffer.length() > 0 ? state.reasoningBuffer.toString() : null;
             recordTrace(execCtx, round, requestJson, state.textBuffer.toString(),
-                    think, state.promptTokens, state.completionTokens, durationMs);
+                    roundThink, state.promptTokens, state.completionTokens, durationMs);
 
             // 保存会话历史 + 长期记忆（在 tryEmitComplete 之前，避免 doFinally 时序问题）
-            saveStreamHistory(conversationId, params, query, state.textBuffer.toString(), think);
+            // 入库 think：结构化输出只取最终轮，非结构化取所有轮累积值
+            String finalThink = resolveFinalThink(params, roundThink, execCtx);
+            String timelineJson = TimelineSerializer.toJson(execCtx.getTimelineCollector().getEntries());
+            saveStreamHistory(conversationId, params, query, state.textBuffer.toString(), finalThink, timelineJson,
+                    execCtx.getSessionId());
 
             // BEFORE_COMPLETE providers + Complete 事件
             if (execCtx != null) {
@@ -912,7 +964,8 @@ public class AgentLoopExecutor {
                 }
             }
             EmitResult completeResult = sink.tryEmitNext(new AgentStreamEvent.Complete(
-                    execCtx.getTotalPromptTokens(), execCtx.getTotalCompletionTokens()));
+                    execCtx.getTotalPromptTokens(), execCtx.getTotalCompletionTokens(),
+                    conversationId, execCtx.getSessionId(), null));
             log.debug("tryEmitNext(Complete) result={}, conversationId={}", completeResult, conversationId);
             EmitResult emitResult = sink.tryEmitComplete();
             log.debug("tryEmitComplete result={}, conversationId={}", emitResult, conversationId);
@@ -930,6 +983,9 @@ public class AgentLoopExecutor {
                 .properties(props)
                 .build();
         messages.add(assistantMsg);
+
+        // 累积本轮思考（用于非结构化输出时最终入库；结构化输出时 resolveFinalThink 会改取最终轮）
+        execCtx.accumulateThink(state.reasoningBuffer.length() > 0 ? state.reasoningBuffer.toString() : null);
 
         if (maxRounds > 0 && roundCounter.get() >= maxRounds) {
             log.debug("Max rounds reached, forcing final answer: conversationId={}", conversationId);
@@ -976,6 +1032,7 @@ public class AgentLoopExecutor {
         // 发射 ToolStart 事件
         for (AssistantMessage.ToolCall tc : safeToolCalls) {
             sink.tryEmitNext(new AgentStreamEvent.ToolStart(tc.name(), tc.id(), tc.arguments()));
+            execCtx.getTimelineCollector().onToolStart(tc.name(), tc.id(), tc.arguments());
         }
 
         toolCallExecutor.executeToolCallsAsync(sink, safeToolCalls, messages, params, execCtx, () -> {
@@ -1043,7 +1100,7 @@ public class AgentLoopExecutor {
         boolean[] inThink = {false};
         final long[] finalUsage = {0, 0};
 
-        llmInvoker.buildRoundChatClient().prompt()
+        Disposable disposable = llmInvoker.buildRoundChatClient().prompt()
                 .messages(newMessages)
                 .stream()
                 .chatResponse()
@@ -1062,9 +1119,12 @@ public class AgentLoopExecutor {
                         String reasoning = thinkingModeProcessor.extractReasoningContent(chunk.getResult().getOutput());
                         if (reasoning != null && !reasoning.isEmpty()) {
                             sink.tryEmitNext(new AgentStreamEvent.Thinking(reasoning));
+                            execCtx.accumulateThink(reasoning);
+                            execCtx.getTimelineCollector().onThinking(reasoning);
                         }
                     }
-                    thinkingModeProcessor.processForceFinalChunk(text, inThink, answerBuffer, sink);
+                    thinkingModeProcessor.processForceFinalChunk(text, inThink, answerBuffer, sink,
+                            execCtx.getTimelineCollector());
                 })
                 .doOnComplete(() -> {
                     String conversationId = params != null ? params.getConversationId() : null;
@@ -1078,15 +1138,27 @@ public class AgentLoopExecutor {
                         }
                     }
                     // 保存会话历史 + 长期记忆（在 tryEmitComplete 之前）
-                    saveStreamHistory(conversationId, params, query, answerBuffer.toString(), null);
+                    // 入库 think：结构化输出不入库（保持最终答案纯净），非结构化取所有轮累积值
+                    String finalThink = isStructuredOutput(params) ? null : execCtx.getAccumulatedThink();
+                    String timelineJson = TimelineSerializer.toJson(execCtx.getTimelineCollector().getEntries());
+                    saveStreamHistory(conversationId, params, query, answerBuffer.toString(), finalThink, timelineJson,
+                            execCtx.getSessionId());
                     sink.tryEmitNext(new AgentStreamEvent.Complete(
-                            execCtx.getTotalPromptTokens(), execCtx.getTotalCompletionTokens()));
+                            execCtx.getTotalPromptTokens(), execCtx.getTotalCompletionTokens(),
+                            conversationId, execCtx.getSessionId(), null));
                     sink.tryEmitComplete();
                 })
                 .onErrorResume(err -> llmInvoker.handleStreamError(err, retryAttempt, sink,
+                        execCtx.getTimelineCollector(),
                         () -> forceFinalStream(messages, sink, params, execCtx, query, retryAttempt + 1),
                         "forceFinal stream error"))
                 .subscribe();
+
+        // 同 scheduleRound：每轮刷新 disposable，保证 stopTask 可中断当前在飞的 forceFinal 流。
+        String conversationId = params != null ? params.getConversationId() : null;
+        if (taskManager != null && conversationId != null) {
+            taskManager.setDisposable(conversationId, disposable);
+        }
     }
 
 }

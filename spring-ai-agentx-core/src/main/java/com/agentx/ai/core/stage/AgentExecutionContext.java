@@ -3,6 +3,7 @@ package com.agentx.ai.core.stage;
 import com.agentx.ai.core.model.RunnableParams;
 import com.agentx.ai.core.model.StageContext;
 import com.agentx.ai.core.model.ToolRecord;
+import com.agentx.ai.core.timeline.TimelineCollector;
 import com.agentx.ai.core.trace.TraceManager;
 
 import java.util.ArrayList;
@@ -29,6 +30,10 @@ public class AgentExecutionContext {
     private long sessionId;
     private final AtomicLong totalPromptTokens = new AtomicLong(0);
     private final AtomicLong totalCompletionTokens = new AtomicLong(0);
+    // 跨轮累积的思考内容（think），用于非结构化输出场景最终入库 agentx_session
+    private final StringBuilder accumulatedThink = new StringBuilder();
+    // 时间线收集器，在事件发射时同步合并，产出渲染就绪的时间线
+    private final TimelineCollector timelineCollector = new TimelineCollector();
 
     public AgentExecutionContext(String query, RunnableParams params) {
         this.query = query;
@@ -88,12 +93,40 @@ public class AgentExecutionContext {
         this.totalCompletionTokens.set(savedCompletion);
     }
 
+    /**
+     * 累积一轮的思考内容（think）。null/空安全。
+     * 多轮之间以换行分隔。
+     */
+    public void accumulateThink(String think) {
+        if (think == null || think.isEmpty()) {
+            return;
+        }
+        if (this.accumulatedThink.length() > 0) {
+            this.accumulatedThink.append("\n");
+        }
+        this.accumulatedThink.append(think);
+    }
+
+    /**
+     * 获取跨轮累积的 think（所有轮拼接），无内容返回 null。
+     */
+    public String getAccumulatedThink() {
+        return accumulatedThink.length() > 0 ? accumulatedThink.toString() : null;
+    }
+
     public long getTotalPromptTokens() {
         return totalPromptTokens.get();
     }
 
     public long getTotalCompletionTokens() {
         return totalCompletionTokens.get();
+    }
+
+    /**
+     * 获取时间线收集器（事件发射时同步合并，产出渲染就绪的时间线）。
+     */
+    public TimelineCollector getTimelineCollector() {
+        return timelineCollector;
     }
 
     /**

@@ -602,12 +602,10 @@ public class ReactAgent {
         }
 
         /**
-         * 启用 &lt;think/&gt; 标签解析。
-         * <p>
          * 启用后，LLM 输出中的 &lt;think&gt;...&lt;/think&gt; 内容会被拆分为
          * {@link AgentStreamEvent.Thinking} 事件，标签外的内容为 {@link AgentStreamEvent.Text} 事件。
          * <p>
-         * 适用于 MiniMax M2.7、Qwen3.5 等使用 &lt;think/&gt; 标签的模型。
+         * 适用于 MiniMax M2.7 <think>标签的模型。
          * 默认 false。
          *
          * @param enabled true 启用

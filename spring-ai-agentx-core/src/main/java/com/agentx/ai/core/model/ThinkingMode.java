@@ -18,7 +18,7 @@ public enum ThinkingMode {
      * &lt;think/&gt; 标签格式。
      * <p>
      * 思考内容嵌入在 content 字段中，用 {@code <think...</think=>} 标签包裹。
-     * 适用于：MiniMax M2.7 等。
+     * 适用于：MiniMax M2.7。
      */
     THINK_TAG,
 

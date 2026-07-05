@@ -17,25 +17,28 @@ import java.util.List;
 
 
 /**
- * 基于 JDBC 的会话记忆实现。
+ * 基于 JDBC 的会话记忆实现（MySQL 专用）。
  *
- * 自动创建 {@code agentx_session} 表，按 conversationId 存储问答对。
+ * <p>自动创建 {@code agentx_session} 表，按 conversationId 存储问答对。
  * 与 {@link JdbcMemoryStore}（{@code agentx_memory} 表）共同构成 DataSource 模式的完整存储方案。
  *
- * 表结构：
+ * <p>表结构（MySQL）：
+ * <pre>
  * CREATE TABLE agentx_session (
  *     id              BIGINT       NOT NULL,
  *     conversation_id VARCHAR(100) NOT NULL,
  *     user_id         VARCHAR(100) DEFAULT NULL,
- *     question        TEXT         NOT NULL,
- *     answer          TEXT         NOT NULL,
- *     think           TEXT         DEFAULT NULL,
+ *     question        LONGTEXT     NOT NULL,
+ *     answer          LONGTEXT     NOT NULL,
+ *     think           LONGTEXT     DEFAULT NULL,
+ *     timeline        LONGTEXT     DEFAULT NULL,
  *     created_at      TIMESTAMP    DEFAULT NULL,
  *     PRIMARY KEY (id)
- * );
+ * ) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+ * </pre>
  *
  * @author bigchui
- * 
+ *
  */
 public class AgentChatMemory implements ChatMemory {
 
@@ -43,27 +46,17 @@ public class AgentChatMemory implements ChatMemory {
 
     private static final String CREATE_TABLE_SQL = """
             CREATE TABLE agentx_session (
-                id              BIGINT       NOT NULL,
-                conversation_id VARCHAR(100) NOT NULL,
-                user_id         VARCHAR(100) DEFAULT NULL,
-                question        TEXT         NOT NULL,
-                answer          TEXT         NOT NULL,
-                think           TEXT         DEFAULT NULL,
-                created_at      TIMESTAMP    DEFAULT NULL,
+                id              BIGINT       NOT NULL  COMMENT '主键ID',
+                conversation_id VARCHAR(100) NOT NULL  COMMENT '会话ID',
+                user_id         VARCHAR(100) DEFAULT NULL COMMENT '用户ID',
+                question        LONGTEXT     NOT NULL  COMMENT '用户提问',
+                answer          LONGTEXT     NOT NULL  COMMENT 'Agent回答',
+                think           LONGTEXT     DEFAULT NULL COMMENT '模型思考内容',
+                timeline        LONGTEXT     DEFAULT NULL COMMENT '时间线JSON（合并后的思考/正文/工具调用序列）',
+                created_at      TIMESTAMP    DEFAULT NULL COMMENT '创建时间',
                 PRIMARY KEY (id)
-            )
+            ) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='AgentX会话记录表'
             """;
-
-    private static final String[] COMMENT_SQLS = {
-            "COMMENT ON TABLE agentx_session IS 'AgentX会话记录表'",
-            "COMMENT ON COLUMN agentx_session.id IS '主键ID'",
-            "COMMENT ON COLUMN agentx_session.conversation_id IS '会话ID'",
-            "COMMENT ON COLUMN agentx_session.user_id IS '用户ID'",
-            "COMMENT ON COLUMN agentx_session.question IS '用户提问'",
-            "COMMENT ON COLUMN agentx_session.answer IS 'Agent回答'",
-            "COMMENT ON COLUMN agentx_session.think IS '模型思考内容'",
-            "COMMENT ON COLUMN agentx_session.created_at IS '创建时间'"
-    };
 
     private static final String CREATE_INDEX_SQL = """
             CREATE INDEX idx_agentx_session_conv ON agentx_session (conversation_id)
@@ -74,8 +67,15 @@ public class AgentChatMemory implements ChatMemory {
             """;
 
     private static final String INSERT_SQL = """
-            INSERT INTO agentx_session (id, conversation_id, user_id, question, answer, think, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO agentx_session (id, conversation_id, user_id, question, answer, think, timeline, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """;
+
+    /**
+     * 给已有表补加 timeline 列（表已存在时执行）。
+     */
+    private static final String ALTER_ADD_TIMELINE_SQL = """
+            ALTER TABLE agentx_session ADD COLUMN timeline LONGTEXT DEFAULT NULL COMMENT '时间线JSON（合并后的思考/正文/工具调用序列）'
             """;
 
     private static final String SELECT_SQL = """
@@ -106,17 +106,18 @@ public class AgentChatMemory implements ChatMemory {
         if (!initialized) {
             synchronized (this) {
                 if (!initialized) {
+                    // MySQL 专用建表语句（utf8mb4 + 内联注释），表已存在时静默跳过
                     try {
                         jdbcTemplate.execute(CREATE_TABLE_SQL);
-                        for (String commentSql : COMMENT_SQLS) {
-                            try {
-                                jdbcTemplate.execute(commentSql);
-                            } catch (Exception e) {
-                                log.debug("Comment skipped: {}", e.getMessage());
-                            }
-                        }
                     } catch (Exception e) {
                         log.debug("Table creation skipped (may already exist): {}", e.getMessage());
+                        // 表已存在时补加 timeline 列（幂等：列已存在则跳过）
+                        try {
+                            jdbcTemplate.execute(ALTER_ADD_TIMELINE_SQL);
+                            log.info("Added timeline column to existing agentx_session table");
+                        } catch (Exception ex) {
+                            log.debug("Timeline column migration skipped (may already exist): {}", ex.getMessage());
+                        }
                     }
                     try {
                         jdbcTemplate.execute(CREATE_INDEX_SQL);
@@ -177,15 +178,52 @@ public class AgentChatMemory implements ChatMemory {
      * @param think          思考过程（可为 null）
      */
     public void add(String conversationId, String userId, String question, String answer, String think) {
+        add(conversationId, userId, question, answer, think, null);
+    }
+
+    /**
+     * 带用户标识、思考过程和时间线的会话存储。
+     *
+     * @param conversationId 会话 ID
+     * @param userId         用户标识（可为 null）
+     * @param question       用户问题
+     * @param answer         助手回答（正文，不含 think）
+     * @param think          思考过程（可为 null）
+     * @param timeline       时间线 JSON（TimelineSerializer 序列化结果，可为 null）
+     */
+    public void add(String conversationId, String userId, String question, String answer,
+                    String think, String timeline) {
+        add(conversationId, userId, question, answer, think, timeline, 0L);
+    }
+
+    /**
+     * 带预生成 sessionId 的会话存储。
+     * <p>
+     * 允许调用方提前生成 sessionId 并复用，用于 trace、文件关联等场景与 agentx_session 主键对齐。
+     * 传 0 时内部回退到 {@link IdWorker#getId()} 自动生成（保持与旧版本等价的行为）。
+     *
+     * @param conversationId 会话 ID
+     * @param userId         用户标识（可为 null）
+     * @param question       用户问题
+     * @param answer         助手回答（正文，不含 think）
+     * @param think          思考过程（可为 null）
+     * @param timeline       时间线 JSON（可为 null）
+     * @param sessionId      预生成的 session ID；为 0 时内部自动生成
+     */
+    public void add(String conversationId, String userId, String question, String answer,
+                    String think, String timeline, long sessionId) {
         ensureInitialized();
 
         if (question == null || answer == null) {
             return;
         }
 
-        jdbcTemplate.update(INSERT_SQL, IdWorker.getId(), conversationId, userId, question, answer,
-                think != null && !think.isEmpty() ? think : null);
-        log.debug("Added Q&A pair to agentx_session: conversationId={}, userId={}", conversationId, userId);
+        long effectiveSessionId = sessionId != 0L ? sessionId : IdWorker.getId();
+        jdbcTemplate.update(INSERT_SQL, effectiveSessionId, conversationId, userId, question, answer,
+                think != null && !think.isEmpty() ? think : null,
+                timeline != null && !timeline.isEmpty() ? timeline : null);
+        log.debug("Added Q&A pair to agentx_session: conversationId={}, userId={}, sessionId={}",
+                conversationId, userId, effectiveSessionId);
     }
 
     @Override

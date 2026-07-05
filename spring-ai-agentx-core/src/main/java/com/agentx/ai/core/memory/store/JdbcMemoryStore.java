@@ -20,28 +20,30 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * 基于 JDBC 的记忆存储实现。
+ * 基于 JDBC 的记忆存储实现（MySQL 专用）。
  *
- * 使用关系型数据库存储记忆条目，自动建表 {@code agentx_memory}。
+ * <p>使用关系型数据库存储记忆条目，自动建表 {@code agentx_memory}。
  * 适用于零配置模式（用户提供 DataSource，框架自动管理表结构）。
  *
- * 表结构：
+ * <p>表结构（MySQL）：
+ * <pre>
  * CREATE TABLE agentx_memory (
  *     id            BIGINT       NOT NULL,
  *     user_id       VARCHAR(100) NOT NULL,
  *     type          VARCHAR(20)  NOT NULL,
- *     content       TEXT         NOT NULL,
- *     description   TEXT         DEFAULT NULL,
- *     metadata_json TEXT         DEFAULT NULL,
+ *     content       LONGTEXT     NOT NULL,
+ *     description   LONGTEXT     DEFAULT NULL,
+ *     metadata_json LONGTEXT     DEFAULT NULL,
  *     created_at    TIMESTAMP    DEFAULT NULL,
  *     updated_at    TIMESTAMP    DEFAULT NULL,
  *     PRIMARY KEY (id)
- * );
+ * ) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+ * </pre>
  *
- * 依赖 spring-jdbc（optional），不使用 DataSource 的用户不会引入此依赖。
+ * <p>依赖 spring-jdbc（optional），不使用 DataSource 的用户不会引入此依赖。
  *
  * @author bigchui
- * 
+ *
  */
 public class JdbcMemoryStore implements MemoryStore {
 
@@ -49,29 +51,17 @@ public class JdbcMemoryStore implements MemoryStore {
 
     private static final String CREATE_TABLE_SQL = """
             CREATE TABLE agentx_memory (
-                id            BIGINT       NOT NULL,
-                user_id       VARCHAR(100) NOT NULL,
-                type          VARCHAR(20)  NOT NULL,
-                content       TEXT         NOT NULL,
-                description   TEXT         DEFAULT NULL,
-                metadata_json TEXT         DEFAULT NULL,
-                created_at    TIMESTAMP    DEFAULT NULL,
-                updated_at    TIMESTAMP    DEFAULT NULL,
+                id            BIGINT       NOT NULL  COMMENT '主键ID',
+                user_id       VARCHAR(100) NOT NULL  COMMENT '用户ID',
+                type          VARCHAR(20)  NOT NULL  COMMENT '记忆类型',
+                content       LONGTEXT     NOT NULL  COMMENT '记忆内容',
+                description   LONGTEXT     DEFAULT NULL COMMENT '记忆描述',
+                metadata_json LONGTEXT     DEFAULT NULL COMMENT '元数据JSON',
+                created_at    TIMESTAMP    DEFAULT NULL COMMENT '创建时间',
+                updated_at    TIMESTAMP    DEFAULT NULL COMMENT '更新时间',
                 PRIMARY KEY (id)
-            )
+            ) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='AgentX记忆存储表'
             """;
-
-    private static final String[] COMMENT_SQLS = {
-            "COMMENT ON TABLE agentx_memory IS 'AgentX记忆存储表'",
-            "COMMENT ON COLUMN agentx_memory.id IS '主键ID'",
-            "COMMENT ON COLUMN agentx_memory.user_id IS '用户ID'",
-            "COMMENT ON COLUMN agentx_memory.type IS '记忆类型'",
-            "COMMENT ON COLUMN agentx_memory.content IS '记忆内容'",
-            "COMMENT ON COLUMN agentx_memory.description IS '记忆描述'",
-            "COMMENT ON COLUMN agentx_memory.metadata_json IS '元数据JSON'",
-            "COMMENT ON COLUMN agentx_memory.created_at IS '创建时间'",
-            "COMMENT ON COLUMN agentx_memory.updated_at IS '更新时间'"
-    };
 
     private static final String CREATE_INDEX_SQL_1 = """
             CREATE INDEX idx_agentx_memory_user_id ON agentx_memory (user_id)
@@ -144,15 +134,9 @@ public class JdbcMemoryStore implements MemoryStore {
         if (!initialized) {
             synchronized (this) {
                 if (!initialized) {
+                    // MySQL 专用建表语句（utf8mb4 + 内联注释），表已存在时静默跳过
                     try {
                         jdbcTemplate.execute(CREATE_TABLE_SQL);
-                        for (String commentSql : COMMENT_SQLS) {
-                            try {
-                                jdbcTemplate.execute(commentSql);
-                            } catch (Exception e) {
-                                log.debug("Comment skipped: {}", e.getMessage());
-                            }
-                        }
                     } catch (Exception e) {
                         log.debug("Table creation skipped (may already exist): {}", e.getMessage());
                     }

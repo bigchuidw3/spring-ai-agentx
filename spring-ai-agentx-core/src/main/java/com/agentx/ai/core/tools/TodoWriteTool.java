@@ -16,7 +16,7 @@ import org.springframework.ai.tool.annotation.ToolParam;
  * 进度推送由框架自动处理：ToolCallExecutor 在执行完 TodoWrite 后，
  * 自动解析参数并发射 {@link com.agentx.ai.core.model.AgentStreamEvent.TodoProgress} 事件。
  *
- * @author Christian Tzolov (original), WANG ZHEN (adapted)
+ * @author Christian Tzolov (original), bigchui (adapted)
  */
 public class TodoWriteTool {
 

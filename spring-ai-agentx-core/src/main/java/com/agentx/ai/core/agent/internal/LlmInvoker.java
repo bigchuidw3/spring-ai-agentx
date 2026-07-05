@@ -3,6 +3,7 @@ package com.agentx.ai.core.agent.internal;
 import com.agentx.ai.core.exception.AgentErrorCode;
 import com.agentx.ai.core.exception.AgentException;
 import com.agentx.ai.core.model.AgentStreamEvent;
+import com.agentx.ai.core.timeline.TimelineCollector;
 import com.agentx.ai.core.tools.toolsearch.DeferredToolRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -148,26 +149,27 @@ public class LlmInvoker {
      */
     public Flux<ChatResponse> handleStreamError(Throwable err, int retryAttempt,
                                                 Sinks.Many<AgentStreamEvent> sink,
+                                                TimelineCollector collector,
                                                 Runnable retryAction, String logLabel) {
         if (retryAttempt < maxRetries) {
             String apiDetail = extractHttpResponseBody(err);
             log.warn("{} (attempt {}/{}), retrying in {}ms: {}{}",
                     logLabel, retryAttempt + 1, maxRetries, RETRY_INTERVAL_MS, err.getMessage(),
                     apiDetail != null ? "\nAPI Response: " + apiDetail : "", err);
+            String retryMsg = "LLM 调用失败，正在重试 (" + (retryAttempt + 1) + "/" + maxRetries + ")";
             sink.tryEmitNext(new AgentStreamEvent.Error(
-                    AgentErrorCode.LLM_CALL_FAILED,
-                    "LLM 调用失败，正在重试 (" + (retryAttempt + 1) + "/" + maxRetries + ")",
-                    err.getMessage()));
+                    AgentErrorCode.LLM_CALL_FAILED, retryMsg, err.getMessage()));
+            collector.onError(retryMsg, err.getMessage());
             Schedulers.boundedElastic().schedule(retryAction, RETRY_INTERVAL_MS, TimeUnit.MILLISECONDS);
         } else {
             String apiDetail = extractHttpResponseBody(err);
             log.error("{} failed after {} retries: {}{}",
                     logLabel, maxRetries, err.getMessage(),
                     apiDetail != null ? "\nAPI Response: " + apiDetail : "", err);
+            String failMsg = "LLM 调用失败（已重试 " + maxRetries + " 次）";
             sink.tryEmitNext(new AgentStreamEvent.Error(
-                    AgentErrorCode.LLM_CALL_FAILED,
-                    "LLM 调用失败（已重试 " + maxRetries + " 次）",
-                    err.getMessage()));
+                    AgentErrorCode.LLM_CALL_FAILED, failMsg, err.getMessage()));
+            collector.onError(failMsg, err.getMessage());
             sink.tryEmitNext(new AgentStreamEvent.Complete());
             sink.tryEmitComplete();
         }
