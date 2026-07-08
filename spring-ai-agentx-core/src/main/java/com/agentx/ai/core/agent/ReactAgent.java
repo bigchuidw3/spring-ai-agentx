@@ -6,6 +6,9 @@ import com.agentx.ai.core.advisors.PauseAdvisor;
 import com.agentx.ai.core.advisors.RequestLoggingAdvisor;
 import com.agentx.ai.core.agent.internal.AgentLoopExecutor;
 import com.agentx.ai.core.agent.internal.AgentTaskManager;
+import com.agentx.ai.core.interrupt.PauseStateStore;
+import com.agentx.ai.core.interrupt.InMemoryPauseStateStore;
+import com.agentx.ai.core.interrupt.PauseReason;
 import com.agentx.ai.core.model.AgentResult;
 import com.agentx.ai.core.model.AgentStreamEvent;
 import com.agentx.ai.core.model.PauseState;
@@ -79,8 +82,16 @@ public class ReactAgent {
     private TraceStore traceStore;
     private final boolean enableTrace;
 
+    /**
+     * Agent 暂停状态存储。默认内存实现，可通过 {@link Builder#stateStore(PauseStateStore)} 自定义。
+     * <p>用于 {@link #interrupt(String)} 时自动持久化 PauseState，
+     * 配合 {@link #hasInterruptedState(String)} / {@link #resumeStream(String)} 实现断点重连。
+     */
+    private final PauseStateStore stateStore;
+
     private ReactAgent(Builder builder, ChatMemory chatMemory, MemoryStore memoryStore,
-                       SemanticMemoryManager semanticMemoryManager, TraceStore traceStore) {
+                       SemanticMemoryManager semanticMemoryManager, TraceStore traceStore,
+                       PauseStateStore stateStore) {
         this.deferredToolRegistry = builder.deferredToolRegistry;
 
         // 构建 ChatClient，统一配置工具选项和 Advisors
@@ -123,6 +134,7 @@ public class ReactAgent {
         this.contextPolicy = builder.contextPolicy;
         this.traceStore = traceStore;
         this.enableTrace = builder.enableTrace;
+        this.stateStore = stateStore;
     }
 
     /**
@@ -179,6 +191,11 @@ public class ReactAgent {
         // 审计 trace（可选）
         if (traceStore != null) {
             executorBuilder.traceStore(traceStore);
+        }
+
+        // 中断状态持久化（必有默认实现）
+        if (stateStore != null) {
+            executorBuilder.stateStore(stateStore);
         }
 
         return executorBuilder.build();
@@ -302,6 +319,99 @@ public class ReactAgent {
         return taskManager.stopTask(conversationId);
     }
 
+    // ==================== 用户主动中断与恢复 ====================
+
+    /**
+     * 用户主动中断当前会话的执行。
+     * <p>
+     * 触发已注册的中断回调：在 {@link PauseStateStore} 中持久化当前 PauseState，
+     * 发射 {@link AgentStreamEvent.Paused} 事件（reason={@link PauseReason#USER_INTERRUPT}），
+     * 然后停止 LLM 流式订阅。
+     *
+     * <p>工具执行阶段被中断时，框架无法取消已发出的外部调用（如 MCP / HTTP），
+     * 副作用可能已部分发生。PauseState.interruptPhase 标识具体阶段，
+     * 恢复时按工具幂等性策略重放 pendingToolCalls。
+     *
+     * @param conversationId 会话 ID
+     * @param message        中断说明消息（可为 null，会附加到 PauseState.interruptMessage）
+     * @return true 表示任务存在并已触发中断流程
+     */
+    public boolean interrupt(String conversationId, String message) {
+        if (taskManager == null) {
+            return false;
+        }
+        boolean triggered = taskManager.interrupt(conversationId, message);
+
+        // interrupt 回调内已发射 Paused 事件；这里同步捕获 PauseState 并持久化
+        // 实际的持久化由 AgentLoopExecutor 在中断回调里通过 storeState 桥接完成
+        return triggered;
+    }
+
+    /**
+     * 用户主动中断（无消息说明）。
+     */
+    public boolean interrupt(String conversationId) {
+        return interrupt(conversationId, null);
+    }
+
+    /**
+     * 检查指定会话是否存在未恢复的中断状态。
+     *
+     * @param conversationId 会话 ID
+     * @return true 表示存在可恢复的 PauseState
+     */
+    public boolean hasInterruptedState(String conversationId) {
+        if (stateStore == null || conversationId == null) {
+            return false;
+        }
+        return stateStore.exists(conversationId);
+    }
+
+    /**
+     * 获取指定会话的中断状态（用于应用层展示"上次有未完成任务"）。
+     *
+     * @param conversationId 会话 ID
+     * @return PauseState，不存在返回 null
+     */
+    public PauseState getInterruptedState(String conversationId) {
+        if (stateStore == null || conversationId == null) {
+            return null;
+        }
+        return stateStore.findByConversationId(conversationId);
+    }
+
+    /**
+     * 丢弃指定会话的中断状态（用户选择"放弃"）。
+     *
+     * @param conversationId 会话 ID
+     * @return true 表示实际删除了状态
+     */
+    public boolean discardInterruptedState(String conversationId) {
+        if (stateStore == null || conversationId == null) {
+            return false;
+        }
+        return stateStore.delete(conversationId);
+    }
+
+    /**
+     * 按会话 ID 从中断状态恢复流式执行。
+     * <p>
+     * 等价于：先从 {@link #getInterruptedState(String)} 取回 PauseState，
+     * 再调用 {@link #resumeStream(PauseState, Map)}（空 toolResults，
+     * 触发 pendingToolCalls 按既定策略重放）。
+     *
+     * @param conversationId 会话 ID
+     * @return AgentStreamEvent 流；状态不存在时返回 Flux.error
+     */
+    public Flux<AgentStreamEvent> resumeStream(String conversationId) {
+        PauseState state = getInterruptedState(conversationId);
+        if (state == null) {
+            return Flux.error(new IllegalStateException(
+                    "No interrupted state for conversation: " + conversationId));
+        }
+        return resumeStream(state, Map.of());
+    }
+
     /**
      * 检查指定会话是否有正在运行的任务
      *
@@ -418,6 +528,7 @@ public class ReactAgent {
         private ContextPolicy contextPolicy;
         private DeferredToolRegistry deferredToolRegistry;
         private boolean enableTrace = true;
+        private PauseStateStore stateStore;
         private final List<Supplier<ReactAgent>> subAgentProviders = new ArrayList<>();
 
         public Builder name(String name) {
@@ -779,6 +890,19 @@ public class ReactAgent {
             return this;
         }
 
+        /**
+         * 配置 Agent 状态存储，启用用户主动中断的断点重连能力。
+         * <p>
+         * 未配置时默认使用 {@link InMemoryPauseStateStore}（单节点、进程内、TTL 7 天）。
+         * 生产环境跨进程持久化请传入 JDBC / Redis 实现。
+         *
+         * @param stateStore 状态存储实例
+         */
+        public Builder stateStore(PauseStateStore stateStore) {
+            this.stateStore = stateStore;
+            return this;
+        }
+
         public ReactAgent build() {
             Objects.requireNonNull(chatModel, "chatModel must not be null");
 
@@ -798,6 +922,12 @@ public class ReactAgent {
             // 传入 SemanticMemoryStore 时，启用语义记忆（第三层）
             if (semanticMemoryStore != null) {
                 semanticMemoryManager = new SemanticMemoryManager(semanticMemoryStore, this.chatModel);
+            }
+
+            // taskManager 默认实例化：流式停止 / 用户主动中断都依赖它，
+            // 不再要求调用方显式注入（与 stateStore 默认策略一致）
+            if (taskManager == null) {
+                taskManager = new AgentTaskManager();
             }
 
             // askUser=true 时自动注册内置 AskUserTool + PauseAdvisor
@@ -838,7 +968,8 @@ public class ReactAgent {
                 tools.add(new SubAgentTool.SubAgentToolCallback(agentName, agentDesc, wrappedProvider));
             }
 
-            return new ReactAgent(this, chatMemory, memoryStore, semanticMemoryManager, traceStore);
+            return new ReactAgent(this, chatMemory, memoryStore, semanticMemoryManager, traceStore,
+                    stateStore != null ? stateStore : new InMemoryPauseStateStore());
         }
     }
 }

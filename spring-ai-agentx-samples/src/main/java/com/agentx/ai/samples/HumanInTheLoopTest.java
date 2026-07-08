@@ -44,7 +44,7 @@ public class HumanInTheLoopTest {
     public static void testCallPauseResume() {
         TestConfig.printTestHeader("测试 1：call 路径 — Pause/Resume");
 
-        ChatModel chatModel = TestConfig.createChatModel();
+        ChatModel chatModel = TestConfig.createDeepSeekV4ChatModel();
 
         ReactAgent agent = ReactAgent.builder()
                 .chatModel(chatModel)
@@ -92,7 +92,7 @@ public class HumanInTheLoopTest {
     public static void testStreamPauseResume() {
         TestConfig.printTestHeader("测试 2：stream 路径 — Pause/Resume");
 
-        ChatModel chatModel = TestConfig.createChatModel();
+        ChatModel chatModel = TestConfig.createDeepSeekV4ChatModel();
 
         ReactAgent agent = ReactAgent.builder()
                 .chatModel(chatModel)
@@ -234,7 +234,7 @@ public class HumanInTheLoopTest {
     public static void testStreamWithFileApproval() {
         TestConfig.printTestHeader("测试 5：流式 + 文件操作审批 — 交互式");
 
-        ChatModel chatModel = TestConfig.createChatModel();
+        ChatModel chatModel = TestConfig.createDeepSeekV4ChatModel();
         Scanner scanner = new Scanner(System.in);
 
         ReactAgent agent = ReactAgent.builder()
@@ -394,7 +394,7 @@ public class HumanInTheLoopTest {
         System.out.println("ChatModel: " + TestConfig.CHAT_MODEL);
         System.out.println("===============================================");
 
-        int testNumber = 6;
+        int testNumber = 1;
 
         switch (testNumber) {
             case 1 -> testCallPauseResume();

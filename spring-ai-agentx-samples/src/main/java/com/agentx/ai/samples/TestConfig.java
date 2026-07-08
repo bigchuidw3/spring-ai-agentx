@@ -441,6 +441,10 @@ public final class TestConfig {
                     System.out.println("\n[Error:" + e.code().code() + "] " + e.message() + "\n  " + e.detail());
             case AgentStreamEvent.Complete c -> System.out.println("\n[Complete]：promptTokens："+c.totalPromptTokens()+ "，completionTokens："+c.totalCompletionTokens());
             case AgentStreamEvent.Paused p -> System.out.println("[Paused]");
+            case AgentStreamEvent.ResumeStart rs -> System.out.println(
+                    "\n[ResumeStart] convId=" + rs.conversationId()
+                    + " pausedRound=" + rs.pausedRound()
+                    + " reason=" + rs.reason());
         }
     }
 

@@ -64,7 +64,7 @@ public class StructuredOutputTest {
     public static void testCallSingleObject() {
         TestConfig.printTestHeader("测试 1：call() — 单对象结构化输出");
 
-        ChatModel chatModel = TestConfig.createChatModel();
+        ChatModel chatModel = TestConfig.createDeepSeekV4ChatModel();
 
         ReactAgent agent = ReactAgent.builder()
                 .chatModel(chatModel)
@@ -100,7 +100,7 @@ public class StructuredOutputTest {
     public static void testCallListObject() {
         TestConfig.printTestHeader("测试 2：call() — List 集合结构化输出");
 
-        ChatModel chatModel = TestConfig.createChatModel();
+        ChatModel chatModel = TestConfig.createDeepSeekV4ChatModel();
 
         ReactAgent agent = ReactAgent.builder()
                 .chatModel(chatModel)
@@ -199,7 +199,7 @@ public class StructuredOutputTest {
         System.out.println("ChatModel: " + TestConfig.CHAT_MODEL);
         System.out.println("===============================================");
 
-        int testNumber = 2;
+        int testNumber = 1;
 
         switch (testNumber) {
             case 1 -> testCallSingleObject();

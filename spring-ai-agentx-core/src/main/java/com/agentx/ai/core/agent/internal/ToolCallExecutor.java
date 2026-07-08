@@ -111,22 +111,6 @@ public class ToolCallExecutor {
     }
 
     /**
-     * 执行工具调用并收集阶段输出（非流式路径）。
-     */
-    public void executeToolCallsWithStage(List<AssistantMessage.ToolCall> toolCalls,
-                                          List<Message> messages, RunnableParams params,
-                                          AgentExecutionContext execCtx,
-                                          Map<String, Object> stageOutputs) {
-        for (AssistantMessage.ToolCall tc : toolCalls) {
-            ToolExecutionResult result = executeSingleTool(tc, params);
-            addToolCallMessages(tc, result, messages);
-
-            execCtx.addToolRecord(tc.name(), tc.id(), tc.arguments(), result.rawResult());
-            collectAfterToolEnd(execCtx, stageOutputs);
-        }
-    }
-
-    /**
      * 执行非拦截的工具调用（拦截的由 resume 处理）。
      */
     public void executeNonPendingTools(List<AssistantMessage.ToolCall> allToolCalls,
@@ -210,6 +194,25 @@ public class ToolCallExecutor {
                 }
             });
         }
+    }
+
+    /**
+     * 解析 USER_INTERRUPT 中断恢复时的工具结果。
+     *
+     * <p>与 {@link #resolveResumeToolResult}（HITL 路径）不同：
+     * <ul>
+     *   <li>已知工具：直接重新执行，拿真实 ToolResponse</li>
+     *   <li>外部工具（MCP 等）：注入占位 ToolResponse，引导 LLM 重新调用</li>
+     * </ul>
+     */
+    public String resolveInterruptToolResult(PendingToolCall ptc,
+                                             AssistantMessage.ToolCall toolCall,
+                                             RunnableParams params) {
+        if (toolMap.containsKey(ptc.name())) {
+            ToolExecutionResult result = executeSingleTool(toolCall, params);
+            return result.rawResult();
+        }
+        return "[工具执行被用户中断，请重新调用 " + ptc.name() + " 工具]";
     }
 
     /**
@@ -415,17 +418,6 @@ public class ToolCallExecutor {
         } catch (Exception e) {
             return false;
         }
-    }
-
-    private void collectAfterToolEnd(AgentExecutionContext execCtx, Map<String, Object> stageOutputs) {
-        if (stageManager.isEmpty()) {
-            return;
-        }
-        stageManager.afterToolEnd(execCtx.toStageContext(), event -> {
-            if (event instanceof AgentStreamEvent.StageOutput so && so.data() != null) {
-                stageOutputs.put(so.stage(), so.data());
-            }
-        });
     }
 
     // ==================== 内部记录 ====================

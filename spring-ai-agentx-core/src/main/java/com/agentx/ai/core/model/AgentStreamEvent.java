@@ -1,6 +1,7 @@
 package com.agentx.ai.core.model;
 
 import com.agentx.ai.core.exception.AgentErrorCode;
+import com.agentx.ai.core.interrupt.PauseReason;
 import com.agentx.ai.core.tools.TodoWriteTool.TodoItem;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonSubTypes;
@@ -25,7 +26,8 @@ import java.util.List;
  *   <li>{@link ToolStart} - 工具即将执行</li>
  *   <li>{@link ToolEnd} - 工具执行完成</li>
  *   <li>{@link TodoProgress} - 任务列表进度更新（TodoWrite 工具触发）</li>
- *   <li>{@link Paused} - 执行暂停，等待外部输入</li>
+ *   <li>{@link Paused} - 执行暂停，等待外部输入（含 HITL 与 USER_INTERRUPT 两种原因）</li>
+ *   <li>{@link ResumeStart} - 从中断状态恢复执行开始（携带原 conversationId、暂停轮次、暂停时间）</li>
  *   <li>{@link StageOutput} - 自定义阶段输出（由 {@link StageOutputProvider} 产生）</li>
  *   <li>{@link Error} - LLM 调用异常（重试时发出）</li>
  *   <li>{@link Complete} - Agent 执行完成</li>
@@ -44,6 +46,7 @@ import java.util.List;
     @JsonSubTypes.Type(value = AgentStreamEvent.ToolEnd.class, name = "ToolEnd"),
     @JsonSubTypes.Type(value = AgentStreamEvent.TodoProgress.class, name = "TodoProgress"),
     @JsonSubTypes.Type(value = AgentStreamEvent.Paused.class, name = "Paused"),
+    @JsonSubTypes.Type(value = AgentStreamEvent.ResumeStart.class, name = "ResumeStart"),
     @JsonSubTypes.Type(value = AgentStreamEvent.StageOutput.class, name = "StageOutput"),
     @JsonSubTypes.Type(value = AgentStreamEvent.Error.class, name = "Error"),
     @JsonSubTypes.Type(value = AgentStreamEvent.Complete.class, name = "Complete")
@@ -56,6 +59,7 @@ public sealed interface AgentStreamEvent permits
         AgentStreamEvent.ToolEnd,
         AgentStreamEvent.TodoProgress,
         AgentStreamEvent.Paused,
+        AgentStreamEvent.ResumeStart,
         AgentStreamEvent.StageOutput,
         AgentStreamEvent.Error,
         AgentStreamEvent.Complete {
@@ -127,11 +131,38 @@ public sealed interface AgentStreamEvent permits
     /**
      * 执行暂停事件，等待外部输入。
      *
-     * @param state  暂停状态
+     * <p>暂停原因（HITL 工具请求 / 用户主动中断）通过 {@link PauseState#getReason()} 区分，
+     * 前端可按原因展示不同 UI（如 HITL 显示工具确认按钮、USER_INTERRUPT 显示"已停止"提示）。
+     *
+     * @param state  暂停状态（含 reason / interruptPhase 等扩展字段）
      * @param source 事件来源（null 表示主 Agent）
      */
     record Paused(PauseState state, SubAgentSource source) implements AgentStreamEvent {
         public Paused(PauseState state) { this(state, null); }
+    }
+
+    /**
+     * 从中断状态恢复执行开始事件。
+     *
+     * <p>恢复流的首个事件，前端据此感知"这是恢复执行"而非新会话。
+     *
+     * @param conversationId 原会话 ID（保持不变）
+     * @param pausedRound    中断时的轮次
+     * @param pausedAt       中断时间戳（epoch millis，0 表示未知）
+     * @param reason         暂停原因
+     * @param source         事件来源（null 表示主 Agent）
+     */
+    record ResumeStart(
+            String conversationId,
+            int pausedRound,
+            long pausedAt,
+            PauseReason reason,
+            SubAgentSource source
+    ) implements AgentStreamEvent {
+        public ResumeStart(String conversationId, int pausedRound, long pausedAt,
+                           PauseReason reason) {
+            this(conversationId, pausedRound, pausedAt, reason, null);
+        }
     }
 
     /**

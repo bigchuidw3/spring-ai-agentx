@@ -8,7 +8,6 @@ import com.agentx.ai.core.tools.toolsearch.DeferredToolRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.ai.chat.client.ChatClientResponse;
 import org.springframework.ai.chat.client.advisor.api.Advisor;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.model.ChatModel;
@@ -61,47 +60,6 @@ public class LlmInvoker {
         this.alwaysLoadTools = alwaysLoadTools;
         this.deferredToolRegistry = deferredToolRegistry;
         this.deferredToolSession = deferredToolSession;
-    }
-
-    /**
-     * 同步调用 LLM（含重试）。
-     */
-    public ChatClientResponse callLlm(List<Message> messages) {
-        Throwable lastError = null;
-        for (int attempt = 0; attempt <= maxRetries; attempt++) {
-            try {
-                ChatClientResponse resp = buildRoundChatClient().prompt()
-                        .messages(messages)
-                        .call()
-                        .chatClientResponse();
-                if (resp.chatResponse() == null || resp.chatResponse().getResult() == null) {
-                    throw new AgentException(AgentErrorCode.LLM_EMPTY_RESPONSE, "LLM 返回空响应");
-                }
-                return resp;
-            } catch (AgentException e) {
-                throw e;
-            } catch (Exception e) {
-                lastError = e;
-                if (attempt < maxRetries) {
-                    String apiDetail = extractHttpResponseBody(e);
-                    log.warn("LLM call failed (attempt {}/{}), retrying in {}ms: {}{}",
-                            attempt + 1, maxRetries, RETRY_INTERVAL_MS, e.getMessage(),
-                            apiDetail != null ? "\nAPI Response: " + apiDetail : "", e);
-                    try {
-                        Thread.sleep(RETRY_INTERVAL_MS);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        throw new AgentException(AgentErrorCode.LLM_CALL_FAILED, "LLM 调用重试被中断", ie);
-                    }
-                }
-            }
-        }
-        String apiDetail = extractHttpResponseBody(lastError);
-        log.error("LLM call failed after {} retries: {}{}",
-                maxRetries, lastError.getMessage(),
-                apiDetail != null ? "\nAPI Response: " + apiDetail : "", lastError);
-        throw new AgentException(AgentErrorCode.LLM_CALL_FAILED,
-                lastError.getMessage(), lastError);
     }
 
     /**

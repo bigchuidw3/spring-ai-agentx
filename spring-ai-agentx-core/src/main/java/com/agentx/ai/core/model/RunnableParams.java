@@ -1,5 +1,8 @@
 package com.agentx.ai.core.model;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -37,6 +40,22 @@ public class RunnableParams {
         this.customParams = Collections.unmodifiableMap(builder.customParams);
         this.toolParams = Collections.unmodifiableMap(builder.toolParams);
         this.outputType = builder.outputType;
+    }
+
+    @JsonCreator
+    private RunnableParams(
+            @JsonProperty("conversationId") String conversationId,
+            @JsonProperty("userId") String userId,
+            @JsonProperty("customParams") Map<String, Object> customParams,
+            @JsonProperty("toolParams") Map<String, Object> toolParams,
+            @JsonProperty("outputType") OutputType outputType) {
+        this.conversationId = conversationId;
+        this.userId = userId;
+        this.customParams = customParams != null
+                ? Collections.unmodifiableMap(new HashMap<>(customParams)) : Collections.emptyMap();
+        this.toolParams = toolParams != null
+                ? Collections.unmodifiableMap(new HashMap<>(toolParams)) : Collections.emptyMap();
+        this.outputType = outputType;
     }
 
     public static Builder builder() {
