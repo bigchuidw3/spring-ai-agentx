@@ -37,6 +37,7 @@ Spring AI AgentX 是一款面向 Java 开发者的 AI Agent 开发框架。基�
 | TodoWrite 任务追踪 | 结构化任务列表工具，流式 TodoProgress 进度事件，保证多步骤任务不遗漏 |
 | TraceAudit 追踪审计 | 基于 `agentx_trace` 表记录每轮 LLM 调用请求/响应/Token，提供大模型调用链路审计和问题追溯 |
 | SubAgent 子代理 | 主 Agent 委派任务给专门的子 Agent，独立 context window，流式事件转发，自动 trace 审计 |
+| 中断与恢复 | 统一 HITL/Interrupt 两种暂停机制，流式/非流式双模式，PauseState 快照持久化到 `agentx_pause_state` 表，跨进程恢复 |
 
 ### v1.0.0-M1
 
@@ -257,6 +258,7 @@ ReactAgent agent = ReactAgent.builder()
 | 16 | TodoWrite 任务追踪 | 结构化任务列表，多步骤任务进度可视化 | [16-TodoWrite任务追踪](docs/core/16-TodoWrite任务追踪.md) |
 | 17 | TraceAudit 追踪审计 | agentx_trace 表记录请求/响应/Token，Complete 事件携带 token 累计 | [17-TraceAudit追踪审计](docs/core/17-TraceAudit追踪审计.md) |
 | 18 | SubAgent 子代理 | 主 Agent 委派任务给子 Agent，独立 context，流式事件转发，SubAgentSource 来源标识 | [18-SubAgent子代理](docs/core/18-SubAgent子代理.md) |
+| 19 | 中断与恢复 | HITL/Interrupt 两种暂停机制，流式/非流式双模式，快照持久化与恢复 | [19-中断与恢复](docs/core/19-中断与恢复.md) |
 
 ---
 
@@ -296,6 +298,7 @@ cp secrets.properties.example secrets.properties
 | `TodoWriteTest` | TodoWrite 任务追踪 | 流式/非流式 TodoProgress 事件，纯 TodoWrite 场景 |
 | `TraceAuditTest` | TraceAudit 追踪审计 | 非流/流式多轮工具调用 + agentx_trace 入库 + Complete 事件 token 累计 |
 | `SubAgentTest` | SubAgent 子代理 | 非流/流式委派，SubAgentSource 事件标识，trace 自动继承 |
+| `InterruptResumeTest` | 中断与恢复 | 流式/非流式 Interrupt、HITL 暂停恢复、Interrupt+HITL 共存、元数据检查 |
 
 > 各示例内部通过 `testNumber` 切换测试场景，修改后直接运行 `main` 方法即可。
 
@@ -334,6 +337,7 @@ cp secrets.properties.example secrets.properties
 - [x] TodoWrite 任务追踪 — 结构化任务列表工具，流式 TodoProgress 进度事件
 - [x] TraceAudit 追踪审计 — `agentx_trace` 表记录每轮 LLM 调用请求/响应/Token，Complete 事件携带 token 累计，支持大模型调用链路审计
 - [x] SubAgent 子代理 — 主 Agent 委派任务给专门的子 Agent，独立 context window，流式事件转发（SubAgentSource 来源标识），自动继承父 Agent trace 审计，框架自动禁用 session/profile memory
+- [x] 中断与恢复 — 统一 HITL/Interrupt 两种暂停机制，call/stream 双模式，`PauseState` 快照持久化到 `agentx_pause_state` 表，跨进程断点续执
 
 ### v1.0.0-M3（规划中）
 
