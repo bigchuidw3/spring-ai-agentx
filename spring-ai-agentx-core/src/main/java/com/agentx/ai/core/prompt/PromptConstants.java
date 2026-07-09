@@ -211,7 +211,69 @@ public final class PromptConstants {
             ## 输出格式
             直接返回合并后的摘要文本（纯文本，不要 JSON，不要 markdown）。""";
 
-    // ==================== 工具发现 ====================
+    // ==================== 中断恢复 ====================
+
+    /**
+     * 中断恢复时追加的用户消息模板。
+     * <p>
+     * 将原始任务和用户在中断后的补充消息一起呈现，让 LLM 自行判断用户意图：
+     * 是对原任务的调整、延续还是完全切换到新任务。
+     */
+    public static final String RESUME_INTERRUPT_USER_PROMPT = """
+            [用户中断后返回]
+
+            你之前的执行已被用户中断，以下是用户返回后发送的消息。
+            请根据原始任务和用户消息之间的关系，判断用户意图并继续执行：
+            - 如果用户是对原任务的细化或方向调整，请据此修正后续输出
+            - 如果用户是提出新问题，请将其作为新任务处理
+            - 如果用户只是让你继续，请无缝恢复执行
+
+            原始任务：
+            %s
+
+            用户消息：
+            %s
+            """;
+
+    /**
+     * 构建中断恢复时的用户消息。
+     *
+     * @param originalQuery 中断前的原始任务
+     * @param resumeQuery   中断后用户的补充消息
+     * @return 格式化后的用户消息文本
+     */
+    public static String buildResumeInterruptMessage(String originalQuery, String resumeQuery) {
+        return RESUME_INTERRUPT_USER_PROMPT.formatted(
+                originalQuery != null ? originalQuery : "无",
+                resumeQuery != null ? resumeQuery : "");
+    }
+
+    // ==================== 中断恢复 - 工具跳过 ====================
+
+    /**
+     * 中断恢复时工具被跳过的占位响应。
+     * <p>
+     * 当用户中断后带着新消息恢复，不再重新执行被中断的工具，
+     * 而是注入此占位提示，让 LLM 根据用户的新指示自行决定下一步。
+     */
+    public static final String INTERRUPT_TOOL_SKIPPED_PROMPT = """
+            工具执行被用户中断，用户返回后给出了新的指示。
+            请根据用户补充的消息判断是否需要继续执行该工具，或调整方案。
+            原工具调用：%s(%s)
+            """;
+
+    /**
+     * 构建中断恢复时被跳过工具的占位响应。
+     *
+     * @param toolName  工具名称
+     * @param arguments 工具参数 JSON
+     * @return 格式化后的占位响应文本
+     */
+    public static String buildInterruptToolSkippedMessage(String toolName, String arguments) {
+        return INTERRUPT_TOOL_SKIPPED_PROMPT.formatted(
+                toolName != null ? toolName : "unknown",
+                arguments != null ? arguments : "");
+    }
 
     /**
      * 工具发现引导提示词（ToolSearch 模式时注入 system prompt）。

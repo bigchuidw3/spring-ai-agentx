@@ -404,12 +404,27 @@ public class ReactAgent {
      * @return AgentStreamEvent 流；状态不存在时返回 Flux.error
      */
     public Flux<AgentStreamEvent> resumeStream(String conversationId) {
+        return resumeStream(conversationId, null);
+    }
+
+    /**
+     * 按会话 ID 从中断状态恢复流式执行，并附带用户中断后补充的新消息。
+     * <p>
+     * 用户中断后通常会想澄清或调整需求（如"换成 X 方向"），
+     * {@code resumeQuery} 会作为新的 UserMessage 追加到恢复后的消息列表末尾，
+     * 让 Agent 在继续执行前先看到用户的补充说明。
+     *
+     * @param conversationId 会话 ID
+     * @param resumeQuery    用户中断后补充的新消息（可为 null）
+     * @return AgentStreamEvent 流；状态不存在时返回 Flux.error
+     */
+    public Flux<AgentStreamEvent> resumeStream(String conversationId, String resumeQuery) {
         PauseState state = getInterruptedState(conversationId);
         if (state == null) {
             return Flux.error(new IllegalStateException(
                     "No interrupted state for conversation: " + conversationId));
         }
-        return resumeStream(state, Map.of());
+        return createExecutor().resumeStream(state, Map.of(), resumeQuery);
     }
 
     /**

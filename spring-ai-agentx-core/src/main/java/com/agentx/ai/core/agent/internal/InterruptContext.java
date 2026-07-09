@@ -52,9 +52,20 @@ public class InterruptContext {
     private final String query;
 
     private volatile SafePoint phase = SafePoint.INIT;
-    /** TOOL_EXECUTION 安全点处缓存的待执行工具调用 */
+    /**
+     * TOOL_EXECUTION 安全点处缓存的待执行工具调用
+     */
     private final AtomicReference<List<AssistantMessage.ToolCall>> pendingToolCalls =
             new AtomicReference<>(List.of());
+
+    /**
+     * 当前轮文本缓冲区引用（中断时取部分输出并持久化到 agentx_session）
+     */
+    private volatile StringBuilder textBuffer;
+    /**
+     * 当前轮推理缓冲区引用（中断时取部分思考并持久化到 agentx_session）
+     */
+    private volatile StringBuilder reasoningBuffer;
 
     public InterruptContext(List<Message> messagesRef,
                             Sinks.Many<AgentStreamEvent> sink,
@@ -84,6 +95,23 @@ public class InterruptContext {
 
     public SafePoint getPhase() {
         return phase;
+    }
+
+    /**
+     * 设置当前轮的文本和推理缓冲区引用（每轮开始时由 scheduleRound 调用）。
+     * 中断时从这些缓冲区读取部分输出并持久化到 agentx_session。
+     */
+    public void setRoundBuffers(StringBuilder text, StringBuilder reasoning) {
+        this.textBuffer = text;
+        this.reasoningBuffer = reasoning;
+    }
+
+    public String getPartialText() {
+        return textBuffer != null ? textBuffer.toString() : "";
+    }
+
+    public String getPartialReasoning() {
+        return reasoningBuffer != null ? reasoningBuffer.toString() : "";
     }
 
     /**

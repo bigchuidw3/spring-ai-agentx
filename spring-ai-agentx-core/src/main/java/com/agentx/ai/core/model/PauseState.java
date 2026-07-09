@@ -98,7 +98,7 @@ public class PauseState {
     }
 
     public List<PendingToolCall> getPendingToolCalls() {
-        return pendingToolCalls;
+        return pendingToolCalls != null ? pendingToolCalls : java.util.Collections.emptyList();
     }
 
     public RunnableParams getParams() {

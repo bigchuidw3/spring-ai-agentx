@@ -29,7 +29,7 @@ import java.util.List;
  *     conversation_id VARCHAR(100) NOT NULL,
  *     user_id         VARCHAR(100) DEFAULT NULL,
  *     question        LONGTEXT     NOT NULL,
- *     answer          LONGTEXT     NOT NULL,
+ *     answer          LONGTEXT     DEFAULT NULL,
  *     think           LONGTEXT     DEFAULT NULL,
  *     timeline        LONGTEXT     DEFAULT NULL,
  *     created_at      TIMESTAMP    DEFAULT NULL,
@@ -50,7 +50,7 @@ public class AgentChatMemory implements ChatMemory {
                 conversation_id VARCHAR(100) NOT NULL  COMMENT '会话ID',
                 user_id         VARCHAR(100) DEFAULT NULL COMMENT '用户ID',
                 question        LONGTEXT     NOT NULL  COMMENT '用户提问',
-                answer          LONGTEXT     NOT NULL  COMMENT 'Agent回答',
+                answer          LONGTEXT     DEFAULT NULL COMMENT 'Agent回答（启动时为空，中断/完成后更新）',
                 think           LONGTEXT     DEFAULT NULL COMMENT '模型思考内容',
                 timeline        LONGTEXT     DEFAULT NULL COMMENT '时间线JSON（合并后的思考/正文/工具调用序列）',
                 created_at      TIMESTAMP    DEFAULT NULL COMMENT '创建时间',
@@ -72,6 +72,21 @@ public class AgentChatMemory implements ChatMemory {
             """;
 
     /**
+     * 插入或更新会话记录。
+     * <p>
+     * 启动时写入（answer 为空），中断/完成时更新 answer / think / timeline。
+     * 同一 sessionId 的多次调用自动合并为一条记录。
+     */
+    private static final String UPSERT_SQL = """
+            INSERT INTO agentx_session (id, conversation_id, user_id, question, answer, think, timeline, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON DUPLICATE KEY UPDATE
+                answer   = VALUES(answer),
+                think    = VALUES(think),
+                timeline = VALUES(timeline)
+            """;
+
+    /**
      * 给已有表补加 timeline 列（表已存在时执行）。
      */
     private static final String ALTER_ADD_TIMELINE_SQL = """
@@ -80,7 +95,8 @@ public class AgentChatMemory implements ChatMemory {
 
     private static final String SELECT_SQL = """
             SELECT question, answer FROM agentx_session
-            WHERE conversation_id = ? ORDER BY created_at ASC
+            WHERE conversation_id = ? AND answer IS NOT NULL AND answer != ''
+            ORDER BY created_at ASC
             """;
 
     private static final String DELETE_SQL = """
@@ -224,6 +240,32 @@ public class AgentChatMemory implements ChatMemory {
                 timeline != null && !timeline.isEmpty() ? timeline : null);
         log.debug("Added Q&A pair to agentx_session: conversationId={}, userId={}, sessionId={}",
                 conversationId, userId, effectiveSessionId);
+    }
+
+    /**
+     * 插入或更新会话记录（UPSERT）。
+     * <p>
+     * 启动时写入（answer 可为 null），中断/完成时更新 answer / think / timeline。
+     * 是 {@link #add} 的超集——允许 answer 为空，且通过 {@code ON DUPLICATE KEY UPDATE} 合并同一 sessionId。
+     *
+     * @param sessionId      预生成的 session ID（必填，不能为 0）
+     * @param conversationId 会话 ID
+     * @param userId         用户标识（可为 null）
+     * @param question       用户问题
+     * @param answer         助手回答（可为 null，启动时为空，中断时为部分内容）
+     * @param think          思考过程（可为 null）
+     * @param timeline       时间线 JSON（可为 null）
+     */
+    public void upsert(long sessionId, String conversationId, String userId, String question,
+                       String answer, String think, String timeline) {
+        ensureInitialized();
+        if (sessionId == 0L || question == null) {
+            return;
+        }
+        jdbcTemplate.update(UPSERT_SQL, sessionId, conversationId, userId, question, answer,
+                think != null && !think.isEmpty() ? think : null,
+                timeline != null && !timeline.isEmpty() ? timeline : null);
+        log.debug("Upserted agentx_session: sessionId={}, conversationId={}", sessionId, conversationId);
     }
 
     @Override

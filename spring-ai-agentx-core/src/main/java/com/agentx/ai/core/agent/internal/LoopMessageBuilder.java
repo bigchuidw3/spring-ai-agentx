@@ -119,14 +119,40 @@ public class LoopMessageBuilder {
     }
 
     /**
+     * 保存会话启动记录到 ChatMemory（仅 question，answer 为空）。
+     * <p>
+     * 在 Agent 执行开始时调用，确保中断/异常场景下前端仍有历史记录可展示。
+     * 后续完成时通过 UPSERT 更新 answer / think / timeline。
+     *
+     * @param query          用户问题
+     * @param conversationId 会话 ID
+     * @param userId         用户标识（可为 null）
+     * @param sessionId      预生成的 agentx_session 主键 ID
+     */
+    public void saveSessionStart(String query, String conversationId, String userId, long sessionId) {
+        if (!enableSession || chatMemory == null || conversationId == null
+                || query == null || query.isEmpty() || sessionId == 0L) {
+            return;
+        }
+        try {
+            if (chatMemory instanceof AgentChatMemory acm) {
+                acm.upsert(sessionId, conversationId, userId, query, null, null, null);
+            }
+            log.debug("Saved session start: conversationId={}, sessionId={}", conversationId, sessionId);
+        } catch (Exception e) {
+            log.error("Failed to save session start: {}", e.getMessage());
+        }
+    }
+
+    /**
      * 保存会话历史到 ChatMemory。
      *
-     * @param query        用户问题
-     * @param answer       助手回答（正文）
-     * @param think        思考过程（可为 null）
-     * @param timelineJson 时间线 JSON（可为 null）
+     * @param query          用户问题
+     * @param answer         助手回答（正文）
+     * @param think          思考过程（可为 null）
+     * @param timelineJson   时间线 JSON（可为 null）
      * @param conversationId 会话 ID
-     * @param userId       用户标识（可为 null）
+     * @param userId         用户标识（可为 null）
      */
     public void saveToChatMemory(String query, String answer, String think, String timelineJson,
                                  String conversationId, String userId) {
@@ -139,13 +165,13 @@ public class LoopMessageBuilder {
      * sessionId 用于让 agentx_session 主键与外部上下文（trace、文件关联等）对齐。
      * 非 {@link AgentChatMemory} 实现的 ChatMemory 会忽略 sessionId。
      *
-     * @param query        用户问题
-     * @param answer       助手回答（正文）
-     * @param think        思考过程（可为 null）
-     * @param timelineJson 时间线 JSON（可为 null）
+     * @param query          用户问题
+     * @param answer         助手回答（正文）
+     * @param think          思考过程（可为 null）
+     * @param timelineJson   时间线 JSON（可为 null）
      * @param conversationId 会话 ID
-     * @param userId       用户标识（可为 null）
-     * @param sessionId    预生成的 agentx_session 主键 ID；为 0 时由底层自动生成
+     * @param userId         用户标识（可为 null）
+     * @param sessionId      预生成的 agentx_session 主键 ID；为 0 时由底层自动生成
      */
     public void saveToChatMemory(String query, String answer, String think, String timelineJson,
                                  String conversationId, String userId, long sessionId) {
@@ -154,7 +180,7 @@ public class LoopMessageBuilder {
         }
         try {
             if (chatMemory instanceof AgentChatMemory acm) {
-                acm.add(conversationId, userId, query, answer, think, timelineJson, sessionId);
+                acm.upsert(sessionId, conversationId, userId, query, answer, think, timelineJson);
             } else {
                 chatMemory.add(conversationId, List.of(
                         new UserMessage(query),

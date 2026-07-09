@@ -39,10 +39,12 @@ import org.springframework.ai.chat.client.advisor.api.Advisor;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.SystemMessage;
+import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.tool.ToolCallback;
+import org.springframework.lang.Nullable;
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Sinks.EmitResult;
@@ -339,28 +341,56 @@ public class AgentLoopExecutor {
      * 注意：sessionId 生成不再依赖 trace 是否启用——trace 关闭时 sessionId 仍可用，
      * 只是 TraceManager 不创建而已。
      */
-    private void initTrace(AgentExecutionContext execCtx, RunnableParams params) {
+    private void initTrace(AgentExecutionContext execCtx, RunnableParams params, String query) {
         // 始终生成 sessionId（即使 trace 未启用，会话存储与外部关联仍需要稳定 ID）
         long sessionId = IdWorker.getId();
         execCtx.setSessionId(sessionId);
 
+        // 启动时保存会话记录（仅 question，answer 为空）
+        String conversationId = params != null ? params.getConversationId() : null;
+        saveStreamHistoryStart(conversationId, params, query, sessionId);
+
         // trace 仅在启用且具备存储条件时初始化（保持原有行为）
         if (traceStore == null || !enableTrace) return;
-        String conversationId = params != null ? params.getConversationId() : null;
         if (conversationId == null) return;
         execCtx.setTraceManager(new TraceManager(traceStore, sessionId, conversationId));
     }
 
     /**
-     * 从暂停恢复时恢复 sessionId 和累计 token。
+     * 从暂停状态恢复 trace 和 session。
+     * <p>
+     * HITL（等工具答案）：复用原 sessionId，延续同一轮对话。<br>
+     * USER_INTERRUPT（用户打断后补充新消息）：新生成 sessionId，创建独立会话记录。
+     *
+     * @param resumeQuery 用户中断后补充的新消息（仅 USER_INTERRUPT 时生效）
+     * @return 有效 query（HITL 返回原 query，INTERRUPT 返回 resumeQuery）
      */
-    private void initTraceFromResume(AgentExecutionContext execCtx, PauseState state) {
-        if (traceStore == null || !enableTrace) return;
-        RunnableParams params = state.getParams();
-        String conversationId = params != null ? params.getConversationId() : null;
-        execCtx.setSessionId(state.getSessionId());
-        execCtx.setTraceManager(new TraceManager(traceStore, state.getSessionId(), conversationId));
+    private String initTraceFromResume(AgentExecutionContext execCtx, PauseState state,
+                                       @Nullable String resumeQuery) {
+        boolean isInterruptResume = state.getReason() == PauseReason.USER_INTERRUPT
+                && resumeQuery != null && !resumeQuery.isBlank();
         execCtx.restoreTokens(state.getTotalPromptTokens(), state.getTotalCompletionTokens());
+
+        if (isInterruptResume) {
+            // 中断恢复 → 新 sessionId，新会话记录
+            long newSessionId = IdWorker.getId();
+            execCtx.setSessionId(newSessionId);
+            String conversationId = state.getParams() != null ? state.getParams().getConversationId() : null;
+            saveStreamHistoryStart(conversationId, state.getParams(), resumeQuery, newSessionId);
+            if (traceStore != null && enableTrace && conversationId != null) {
+                execCtx.setTraceManager(new TraceManager(traceStore, newSessionId, conversationId));
+            }
+            return resumeQuery;
+        }
+
+        // HITL 或 interrupt 但无 resumeQuery → 复用原 sessionId
+        execCtx.setSessionId(state.getSessionId());
+        if (traceStore != null && enableTrace) {
+            RunnableParams params = state.getParams();
+            String conversationId = params != null ? params.getConversationId() : null;
+            execCtx.setTraceManager(new TraceManager(traceStore, state.getSessionId(), conversationId));
+        }
+        return state.getQuery();
     }
 
     /**
@@ -432,7 +462,7 @@ public class AgentLoopExecutor {
         List<Message> messages = messageBuilder.buildInitialMessages(query, params);
         Sinks.Many<AgentStreamEvent> sink = Sinks.many().unicast().onBackpressureBuffer();
         AgentExecutionContext execCtx = new AgentExecutionContext(query, params);
-        initTrace(execCtx, params);
+        initTrace(execCtx, params, query);
         AtomicLong roundCounter = new AtomicLong(0);
 
         registerInterruptContext(messages, sink, params, query, execCtx, roundCounter);
@@ -508,7 +538,7 @@ public class AgentLoopExecutor {
      * @return AgentResult（Completed 或 Paused）
      */
     public AgentResult resume(PauseState state, Map<String, String> toolResults) {
-        List<Message> messages = buildResumeMessages(state, toolResults);
+        List<Message> messages = buildResumeMessages(state, toolResults, null);
 
         String conversationId = state.getParams() != null ? state.getParams().getConversationId() : null;
         if (taskManager != null && conversationId != null) {
@@ -518,7 +548,7 @@ public class AgentLoopExecutor {
             }
         }
         try {
-            AgentResult result = resumeViaStreamForResult(messages, state);
+            AgentResult result = resumeViaStreamForResult(messages, state, null);
             if (result instanceof AgentResult.Completed && stateStore != null && conversationId != null) {
                 stateStore.delete(conversationId);
             }
@@ -533,15 +563,16 @@ public class AgentLoopExecutor {
     /**
      * 流式-backed 恢复执行：创建 sink、恢复 trace、委托给 {@link #blockForResult}。
      */
-    private AgentResult resumeViaStreamForResult(List<Message> messages, PauseState state) {
+    private AgentResult resumeViaStreamForResult(List<Message> messages, PauseState state,
+                                                 @Nullable String resumeQuery) {
         Sinks.Many<AgentStreamEvent> sink = Sinks.many().unicast().onBackpressureBuffer();
         AtomicLong roundCounter = new AtomicLong(state.getCurrentRound());
         AgentExecutionContext execCtx = new AgentExecutionContext(state.getQuery(), state.getParams());
-        initTraceFromResume(execCtx, state);
+        String effectiveQuery = initTraceFromResume(execCtx, state, resumeQuery);
 
-        registerInterruptContext(messages, sink, state.getParams(), state.getQuery(), execCtx, roundCounter);
+        registerInterruptContext(messages, sink, state.getParams(), effectiveQuery, execCtx, roundCounter);
 
-        return blockForResult(messages, sink, roundCounter, state.getParams(), execCtx, state.getQuery());
+        return blockForResult(messages, sink, roundCounter, state.getParams(), execCtx, effectiveQuery);
     }
 
     /**
@@ -553,9 +584,14 @@ public class AgentLoopExecutor {
     private String resolveToolResult(PendingToolCall ptc,
                                      AssistantMessage.ToolCall toolCall,
                                      Map<String, String> toolResults,
-                                     PauseState state) {
+                                     PauseState state,
+                                     @Nullable String resumeQuery) {
         if (state.getReason() == PauseReason.USER_INTERRUPT
                 && state.getSafePoint() == SafePoint.TOOL_EXECUTION) {
+            // 用户中断后带着新消息恢复 → 不重跑工具，注入占位让 LLM 根据新指令决策
+            if (resumeQuery != null && !resumeQuery.isBlank()) {
+                return PromptConstants.buildInterruptToolSkippedMessage(ptc.name(), ptc.arguments());
+            }
             return toolCallExecutor.resolveInterruptToolResult(ptc, toolCall, state.getParams());
         }
         return toolCallExecutor.resolveResumeToolResult(ptc, toolCall, toolResults, state.getParams());
@@ -565,13 +601,18 @@ public class AgentLoopExecutor {
      * 从 PauseState 恢复消息列表，注入 pending tool calls 的 ToolResponseMessage。
      * 供 {@link #resume} 和 {@link #resumeStream} 共用，消除重复的消息恢复代码。
      */
-    private List<Message> buildResumeMessages(PauseState state, Map<String, String> toolResults) {
+    private List<Message> buildResumeMessages(PauseState state, Map<String, String> toolResults,
+                                              @Nullable String resumeQuery) {
         List<Message> messages = new ArrayList<>(state.getMessages());
         for (PendingToolCall ptc : state.getPendingToolCalls()) {
             AssistantMessage.ToolCall toolCall = new AssistantMessage.ToolCall(
                     ptc.id(), "function", ptc.name(), ptc.arguments());
-            String result = resolveToolResult(ptc, toolCall, toolResults, state);
+            String result = resolveToolResult(ptc, toolCall, toolResults, state, resumeQuery);
             toolCallExecutor.addNormalToolMessage(toolCall, result, messages);
+        }
+        if (resumeQuery != null && !resumeQuery.isBlank()) {
+            messages.add(new UserMessage(
+                    PromptConstants.buildResumeInterruptMessage(state.getQuery(), resumeQuery)));
         }
         return messages;
     }
@@ -600,7 +641,7 @@ public class AgentLoopExecutor {
 
         // AgentStart + AFTER_START providers
         AgentExecutionContext execCtx = new AgentExecutionContext(query, params);
-        initTrace(execCtx, params);
+        initTrace(execCtx, params, query);
         sink.tryEmitNext(new AgentStreamEvent.AgentStart());
         if (!stageManager.isEmpty()) {
             stageManager.afterStart(execCtx.toStageContext(), sink::tryEmitNext);
@@ -624,7 +665,20 @@ public class AgentLoopExecutor {
      * @return AgentStreamEvent 流
      */
     public Flux<AgentStreamEvent> resumeStream(PauseState state, Map<String, String> toolResults) {
-        List<Message> messages = buildResumeMessages(state, toolResults);
+        return resumeStream(state, toolResults, null);
+    }
+
+    /**
+     * 从暂停状态恢复流式执行，可附带用户中断后补充的新消息。
+     *
+     * @param state       暂停状态
+     * @param toolResults 工具调用结果
+     * @param resumeQuery 用户中断后补充的新消息（可为 null）
+     * @return AgentStreamEvent 流
+     */
+    public Flux<AgentStreamEvent> resumeStream(PauseState state, Map<String, String> toolResults,
+                                               @Nullable String resumeQuery) {
+        List<Message> messages = buildResumeMessages(state, toolResults, resumeQuery);
 
         String conversationId = state.getParams() != null ? state.getParams().getConversationId() : null;
 
@@ -639,10 +693,9 @@ public class AgentLoopExecutor {
             }
         }
 
-        String query = state.getQuery();
         AtomicLong roundCounter = new AtomicLong(state.getCurrentRound());
-        AgentExecutionContext execCtx = new AgentExecutionContext(query, state.getParams());
-        initTraceFromResume(execCtx, state);
+        AgentExecutionContext execCtx = new AgentExecutionContext(state.getQuery(), state.getParams());
+        String effectiveQuery = initTraceFromResume(execCtx, state, resumeQuery);
 
         // 发射 ResumeStart 事件，通知前端"恢复执行开始"
         sink.tryEmitNext(new AgentStreamEvent.ResumeStart(
@@ -651,14 +704,14 @@ public class AgentLoopExecutor {
                 state.getInterruptedAt(),
                 state.getReason()));
 
-        registerInterruptContext(messages, sink, state.getParams(), query, execCtx, roundCounter);
+        registerInterruptContext(messages, sink, state.getParams(), effectiveQuery, execCtx, roundCounter);
 
         // disposable 的注册由 scheduleRound 内部每轮刷新负责，此处不再手动 setDisposable
-        scheduleRound(messages, sink, roundCounter, state.getParams(), execCtx, query);
+        scheduleRound(messages, sink, roundCounter, state.getParams(), execCtx, effectiveQuery);
 
         // 正常完成时清理快照（Paused 不能删，会通过 UPSERT 覆盖）
         var wasPaused = new java.util.concurrent.atomic.AtomicBoolean(false);
-        return wrapStreamFlux(sink, conversationId, roundCounter, state.getParams(), query)
+        return wrapStreamFlux(sink, conversationId, roundCounter, state.getParams(), effectiveQuery)
                 .doOnNext(event -> {
                     if (event instanceof AgentStreamEvent.Paused) {
                         wasPaused.set(true);
@@ -690,6 +743,27 @@ public class AgentLoopExecutor {
                         taskManager.stopTask(conversationId);
                     }
                 });
+    }
+
+    /**
+     * 启动时保存会话记录（仅 question，answer 为空）。
+     * 确保中断/异常场景下前端仍有历史记录可展示。
+     */
+    private void saveStreamHistoryStart(String conversationId, RunnableParams params,
+                                        String query, long sessionId) {
+        if (conversationId == null || !enableSession) return;
+        messageBuilder.saveSessionStart(query, conversationId,
+                params != null ? params.getUserId() : null, sessionId);
+    }
+
+    /**
+     * 中断/停止时保存部分输出到 agentx_session（UPDATE 已有行）。
+     */
+    private void saveSessionPartial(long sessionId, String conversationId, RunnableParams params,
+                                    String query, String answer, String think, String timelineJson) {
+        if (conversationId == null || !enableSession) return;
+        messageBuilder.saveToChatMemory(query, answer, think, timelineJson, conversationId,
+                params != null ? params.getUserId() : null, sessionId);
     }
 
     /**
@@ -740,6 +814,13 @@ public class AgentLoopExecutor {
             taskManager.setInterruptHandler(conversationId, msg -> {
                 PauseState snapshot = interruptContext.buildSnapshot(msg, execCtx, roundCounter.get());
                 persistPauseState(snapshot);
+                // 保存已输出的部分内容到 agentx_session
+                String conversationId1 = params != null ? params.getConversationId() : null;
+                String partialAnswer = interruptContext.getPartialText();
+                String partialThink = interruptContext.getPartialReasoning();
+                String timelineJson = TimelineSerializer.toJson(execCtx.getTimelineCollector().getEntries());
+                saveSessionPartial(execCtx.getSessionId(), conversationId1, params, query,
+                        partialAnswer, partialThink, timelineJson);
                 interruptContext.emitPausedAndComplete(snapshot);
             });
         }
@@ -764,6 +845,10 @@ public class AgentLoopExecutor {
         }
 
         RoundState roundState = new RoundState();
+        // 注册当前轮缓冲区，使中断回调能读取部分输出并持久化
+        if (interruptContext != null) {
+            interruptContext.setRoundBuffers(roundState.textBuffer, roundState.reasoningBuffer);
+        }
         long startTime = System.currentTimeMillis();
 
         // 上下文压缩（每轮 LLM 调用前执行）
