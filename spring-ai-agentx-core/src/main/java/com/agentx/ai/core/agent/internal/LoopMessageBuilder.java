@@ -42,11 +42,14 @@ public class LoopMessageBuilder {
     private final DeferredToolRegistry deferredToolRegistry;
     private final boolean todoWriteEnabled;
     private final boolean enableSession;
+    private final int maxHistoryRounds;
+    private final int maxHistoryTokens;
 
     public LoopMessageBuilder(String instructions, ChatMemory chatMemory,
                               MemoryInjector memoryInjector, ThinkingMode thinkingMode,
                               DeferredToolRegistry deferredToolRegistry,
-                              boolean todoWriteEnabled, boolean enableSession) {
+                              boolean todoWriteEnabled, boolean enableSession,
+                              int maxHistoryRounds, int maxHistoryTokens) {
         this.instructions = instructions;
         this.chatMemory = chatMemory;
         this.memoryInjector = memoryInjector;
@@ -54,6 +57,8 @@ public class LoopMessageBuilder {
         this.deferredToolRegistry = deferredToolRegistry;
         this.todoWriteEnabled = todoWriteEnabled;
         this.enableSession = enableSession;
+        this.maxHistoryRounds = maxHistoryRounds;
+        this.maxHistoryTokens = maxHistoryTokens;
     }
 
     /**
@@ -91,7 +96,12 @@ public class LoopMessageBuilder {
 
         String conversationId = params != null ? params.getConversationId() : null;
         if (enableSession && chatMemory != null && conversationId != null) {
-            List<Message> history = chatMemory.get(conversationId);
+            List<Message> history;
+            if (chatMemory instanceof AgentChatMemory acm) {
+                history = acm.get(conversationId, maxHistoryRounds, maxHistoryTokens);
+            } else {
+                history = chatMemory.get(conversationId);
+            }
             for (Message msg : history) {
                 if (!(msg instanceof SystemMessage)) {
                     messages.add(msg);

@@ -117,7 +117,7 @@ public class MemoryPersistor {
         SHARED_EXECUTOR.execute(() -> {
             try {
                 semanticMemoryManager.saveQaPair(userId, question, answer, conversationId);
-//                semanticMemoryManager.checkAndSummarize(userId);
+                semanticMemoryManager.checkAndSummarize(userId);
                 log.debug("Semantic memory save completed for userId={}", userId);
             } catch (Exception e) {
                 log.error("Semantic memory save failed for userId={}: {}",

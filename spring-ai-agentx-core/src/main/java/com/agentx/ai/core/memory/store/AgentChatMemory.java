@@ -1,6 +1,8 @@
 package com.agentx.ai.core.memory.store;
 
+import com.agentx.ai.core.context.TokenEstimator;
 import com.agentx.ai.core.stage.ThinkTagParser;
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.memory.ChatMemory;
@@ -97,6 +99,18 @@ public class AgentChatMemory implements ChatMemory {
             SELECT question, answer FROM agentx_session
             WHERE conversation_id = ? AND answer IS NOT NULL AND answer != ''
             ORDER BY created_at ASC
+            """;
+
+    /**
+     * 加载最近 N 轮对话历史（子查询取最后 N 条，外层恢复 ASC 排序）。
+     */
+    private static final String SELECT_SQL_LIMIT = """
+            SELECT question, answer FROM (
+                SELECT question, answer, created_at FROM agentx_session
+                WHERE conversation_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+            ) AS recent ORDER BY created_at ASC
             """;
 
     private static final String DELETE_SQL = """
@@ -271,13 +285,85 @@ public class AgentChatMemory implements ChatMemory {
     @Override
     public List<Message> get(String conversationId) {
         ensureInitialized();
+        return get(conversationId, Integer.MAX_VALUE);
+    }
+
+    /**
+     * 加载指定会话的最近 {@code maxRounds} 轮对话历史（Q&A 对）。
+     * <p>
+     * 先按 created_at DESC 取最后 N 条，再恢复 ASC 排序，保证返回的消息按时间顺序排列。
+     *
+     * @param conversationId 会话 ID
+     * @param maxRounds      最大加载轮数
+     * @return UserMessage + AssistantMessage 交替的消息列表
+     */
+    public List<Message> get(String conversationId, int maxRounds) {
+        ensureInitialized();
+
+        // 非正值视为不限制
+        if (maxRounds <= 0) {
+            maxRounds = Integer.MAX_VALUE;
+        }
 
         List<Message> result = new ArrayList<>();
-        jdbcTemplate.query(SELECT_SQL, rs -> {
+        jdbcTemplate.query(SELECT_SQL_LIMIT, rs -> {
+            String answer = rs.getString("answer");
+            // 空 answer 不拼接入上下文，但已占 LIMIT 名额
+            if (StringUtils.isEmpty(answer)) {
+                return;
+            }
             result.add(new UserMessage(rs.getString("question")));
-            result.add(new AssistantMessage(rs.getString("answer")));
-        }, conversationId);
+            result.add(new AssistantMessage(answer));
+        }, conversationId, maxRounds);
 
+        return result;
+    }
+
+    /**
+     * 加载指定会话的历史，同时受轮数和 token 双重上限约束。
+     *
+     * <p>先按轮数上限加载，再按 token 上限从前往后截断，保证不拆散单个 Q&A 对。
+     *
+     * @param conversationId 会话 ID
+     * @param maxRounds      最大加载轮数（≤ 0 表示不限）
+     * @param maxTokens      最大估算 token 数（≤ 0 表示不限）
+     * @return UserMessage + AssistantMessage 交替的消息列表
+     */
+    public List<Message> get(String conversationId, int maxRounds, int maxTokens) {
+        List<Message> messages = get(conversationId, maxRounds);
+        // 非正值视为不限制
+        if (maxTokens <= 0 || messages.isEmpty()) {
+            return messages;
+        }
+        return truncateByTokens(messages, maxTokens);
+    }
+
+    /**
+     * 从消息列表头部删除完整的 Q&A 对，直到估算 token 数不超上限。
+     * 保证不拆散单轮对话，保留最近的轮次。
+     */
+    private List<Message> truncateByTokens(List<Message> messages, int maxTokens) {
+        List<Message> result = new ArrayList<>(messages);
+        int totalTokens = TokenEstimator.estimateTokens(result);
+        if (totalTokens <= maxTokens) {
+            return result;
+        }
+
+        log.debug("Truncating history by tokens: {} > {}, {} rounds",
+                totalTokens, maxTokens, result.size() / 2);
+
+        while (totalTokens > maxTokens && result.size() >= 2) {
+            // 一个完整 Q&A 对 = UserMessage + AssistantMessage
+            Message user = result.get(0);
+            Message assistant = result.get(1);
+            int pairTokens = TokenEstimator.estimateTokens(List.of(user, assistant));
+            result.remove(0);
+            result.remove(0);
+            totalTokens -= pairTokens;
+        }
+
+        log.debug("Token truncation complete: {} tokens, {} rounds kept",
+                totalTokens, result.size() / 2);
         return result;
     }
 

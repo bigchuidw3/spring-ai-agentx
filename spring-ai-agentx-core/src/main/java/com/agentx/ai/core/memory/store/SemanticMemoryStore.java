@@ -18,7 +18,7 @@ import java.util.Objects;
  * - {@code type: "summary"} — 摘要文档（达到阈值后合并生成）
  *
  * @author bigchui
- * 
+ *
  */
 public class SemanticMemoryStore {
 
@@ -29,7 +29,7 @@ public class SemanticMemoryStore {
     public static final String DOC_TYPE_SUMMARY = "summary";
 
     /** 默认摘要触发阈值 */
-    public static final int DEFAULT_SUMMARIZE_THRESHOLD = 30;
+    public static final int DEFAULT_SUMMARIZE_THRESHOLD = 15;
 
     private final VectorStore vectorStore;
     private final EmbeddingModel embeddingModel;

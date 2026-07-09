@@ -32,13 +32,18 @@ import java.util.UUID;
  * - {@code type: "summary"} — 摘要文档
  *
  * @author bigchui
- * 
+ *
  */
 public class SemanticMemoryManager {
 
     private static final Logger log = LoggerFactory.getLogger(SemanticMemoryManager.class);
 
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+    /** 摘要生成每批处理的 Q&A 数量，避免单次 LLM 调用超时 */
+    private static final int SUMMARIZE_BATCH_SIZE = 5;
+    /** 每条 Q&A 内容的字符数上限，超出部分截断 */
+    private static final int MAX_QA_CONTENT_LENGTH = 2000;
 
     private final VectorStore vectorStore;
     private final ChatModel chatModel;
@@ -95,22 +100,29 @@ public class SemanticMemoryManager {
     /**
      * 检查是否达到摘要阈值，如果达到则触发摘要合并。
      *
-     * 优化策略：先查 topK = summarizeThreshold 条，
-     * 只有达到阈值时才表示需要摘要，此时这批数据直接用于摘要合并。
+     * <p>循环批量处理：每次取 summarizeThreshold 条 qa_pair 进行摘要，
+     * 处理完后继续检查剩余数量，直到不足阈值为止。
+     * 防止向量库积压大量 qa_pair 时单次调用只处理一批。
      *
      * @param userId 用户标识
      */
     public void checkAndSummarize(String userId) {
-        // 第一步：只查阈值数量的文档，用于判断 + 摘要
-        List<Document> qaDocs = findQaPairDocs(userId, summarizeThreshold);
-        log.debug("Q&A document count for userId={}: {}/{}", userId, qaDocs.size(), summarizeThreshold);
+        int totalProcessed = 0;
+        while (true) {
+            List<Document> qaDocs = findQaPairDocs(userId, summarizeThreshold);
+            if (qaDocs.size() < summarizeThreshold) {
+                log.debug("Q&A document count for userId={}: {}/{}", userId, qaDocs.size(), summarizeThreshold);
+                break;
+            }
 
-        if (qaDocs.size() < summarizeThreshold) {
-            return;
+            log.info("Summarize threshold reached for userId={}: {} >= {}", userId, qaDocs.size(), summarizeThreshold);
+            summarizeQaPairs(userId, qaDocs);
+            totalProcessed += qaDocs.size();
         }
 
-        log.info("Summarize threshold reached for userId={}: {} >= {}", userId, qaDocs.size(), summarizeThreshold);
-        summarizeQaPairs(userId, qaDocs);
+        if (totalProcessed > 0) {
+            log.info("Summarization complete for userId={}: {} qa_pairs processed", userId, totalProcessed);
+        }
     }
 
     /**
@@ -130,7 +142,7 @@ public class SemanticMemoryManager {
         SearchRequest request = SearchRequest.builder()
                 .query("")
                 .topK(limit)
-                .similarityThreshold(0.0)
+                .similarityThreshold(SearchRequest.SIMILARITY_THRESHOLD_ACCEPT_ALL)
                 .filterExpression(filter)
                 .build();
 
@@ -271,24 +283,46 @@ public class SemanticMemoryManager {
     }
 
     /**
-     * 使用 LLM 将 Q&A 文档合并为摘要。
+     * 分批使用 LLM 将 Q&A 文档合并为摘要。
+     *
+     * <p>每批 {@link #SUMMARIZE_BATCH_SIZE} 条，每条内容截断至
+     * {@link #MAX_QA_CONTENT_LENGTH} 字符，避免单次 LLM 调用超时。
      */
     private List<String> generateSummaries(List<Document> qaDocs) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < qaDocs.size(); i++) {
-            sb.append("### 对话 ").append(i + 1).append("\n");
-            sb.append(qaDocs.get(i).getText()).append("\n\n");
+        List<String> allSummaries = new ArrayList<>();
+
+        for (int start = 0; start < qaDocs.size(); start += SUMMARIZE_BATCH_SIZE) {
+            int end = Math.min(start + SUMMARIZE_BATCH_SIZE, qaDocs.size());
+            List<Document> batch = qaDocs.subList(start, end);
+
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < batch.size(); i++) {
+                String text = batch.get(i).getText();
+                if (text != null && text.length() > MAX_QA_CONTENT_LENGTH) {
+                    text = text.substring(0, MAX_QA_CONTENT_LENGTH) + "...";
+                }
+                sb.append("### 对话 ").append(start + i + 1).append("\n");
+                sb.append(text != null ? text : "").append("\n\n");
+            }
+
+            try {
+                String result = ChatClient.builder(chatModel)
+                        .build()
+                        .prompt()
+                        .system(PromptConstants.SEMANTIC_SUMMARIZATION_PROMPT)
+                        .user("以下是需要合并的对话：\n\n" + sb)
+                        .call()
+                        .content();
+
+                List<String> batchSummaries = parseSummaries(result);
+                allSummaries.addAll(batchSummaries);
+                log.debug("Summarized batch {}-{} of {} qa_pairs", start + 1, end, qaDocs.size());
+            } catch (Exception e) {
+                log.error("Summarization failed for batch {}-{}: {}", start + 1, end, e.getMessage());
+            }
         }
 
-        String result = ChatClient.builder(chatModel)
-                .build()
-                .prompt()
-                .system(PromptConstants.SEMANTIC_SUMMARIZATION_PROMPT)
-                .user("以下是需要合并的对话：\n\n" + sb)
-                .call()
-                .content();
-
-        return parseSummaries(result);
+        return allSummaries;
     }
 
     /**

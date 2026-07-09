@@ -88,11 +88,15 @@ public class ReactAgent {
      * 配合 {@link #hasInterruptedState(String)} / {@link #resumeStream(String)} 实现断点重连。
      */
     private final PauseStateStore stateStore;
+    private final int maxHistoryRounds;
+    private final int maxHistoryTokens;
 
     private ReactAgent(Builder builder, ChatMemory chatMemory, MemoryStore memoryStore,
                        SemanticMemoryManager semanticMemoryManager, TraceStore traceStore,
                        PauseStateStore stateStore) {
         this.deferredToolRegistry = builder.deferredToolRegistry;
+        this.maxHistoryRounds = builder.maxHistoryRounds;
+        this.maxHistoryTokens = builder.maxHistoryTokens;
 
         // 构建 ChatClient，统一配置工具选项和 Advisors
         ChatClient.Builder clientBuilder = ChatClient.builder(builder.chatModel);
@@ -171,7 +175,9 @@ public class ReactAgent {
                 .stageOutputProviders(stageOutputProviders)
                 .thinkingMode(thinkingMode)
                 .maxRetries(maxRetries)
-                .advisors(advisors);
+                .advisors(advisors)
+                .maxHistoryRounds(maxHistoryRounds)
+                .maxHistoryTokens(maxHistoryTokens);
 
         // 上下文压缩（可选）
         if (this.contextPolicy != null) {
@@ -544,6 +550,8 @@ public class ReactAgent {
         private DeferredToolRegistry deferredToolRegistry;
         private boolean enableTrace = true;
         private PauseStateStore stateStore;
+        private int maxHistoryRounds = 30;
+        private int maxHistoryTokens = 10000;
         private final List<Supplier<ReactAgent>> subAgentProviders = new ArrayList<>();
 
         public Builder name(String name) {
@@ -915,6 +923,31 @@ public class ReactAgent {
          */
         public Builder stateStore(PauseStateStore stateStore) {
             this.stateStore = stateStore;
+            return this;
+        }
+
+        /**
+         * 设置对话历史加载的最大轮数，默认 30。
+         * <p>
+         * 传 0 或负值时关闭轮数限制（全量加载）。
+         * 与 {@link #maxHistoryTokens(int)} 共同作用，先按轮数截断再按 token 截断。
+         *
+         * @param maxHistoryRounds 最大历史轮数，≤ 0 表示不限制
+         */
+        public Builder maxHistoryRounds(int maxHistoryRounds) {
+            this.maxHistoryRounds = maxHistoryRounds;
+            return this;
+        }
+
+        /**
+         * 设置对话历史加载的估算 token 上限，默认 10000。
+         * <p>
+         * 传 0 或负值时关闭 token 限制。先按轮数加载，再按 token 从前往后截断完整 Q&A 对。
+         *
+         * @param maxHistoryTokens 最大估算 token 数，≤ 0 表示不限制
+         */
+        public Builder maxHistoryTokens(int maxHistoryTokens) {
+            this.maxHistoryTokens = maxHistoryTokens;
             return this;
         }
 

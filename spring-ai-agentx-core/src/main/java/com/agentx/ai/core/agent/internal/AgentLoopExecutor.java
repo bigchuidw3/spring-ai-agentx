@@ -163,7 +163,8 @@ public class AgentLoopExecutor {
         this.messageBuilder = new LoopMessageBuilder(
                 builder.instructions, builder.chatMemory,
                 memoryInjector, builder.thinkingMode, builder.deferredToolRegistry,
-                hasTodoWrite, builder.enableSession);
+                hasTodoWrite, builder.enableSession,
+                builder.maxHistoryRounds, builder.maxHistoryTokens);
 
         // 工具调用执行器
         this.toolCallExecutor = new ToolCallExecutor(toolMap, new ObjectMapper(),
@@ -196,6 +197,8 @@ public class AgentLoopExecutor {
         private List<Advisor> advisors;
         private TraceStore traceStore;
         private PauseStateStore stateStore;
+        private int maxHistoryRounds = 30;
+        private int maxHistoryTokens = 10000;
 
         public Builder chatClient(ChatClient v) {
             this.chatClient = v;
@@ -299,6 +302,16 @@ public class AgentLoopExecutor {
 
         public Builder stateStore(PauseStateStore v) {
             this.stateStore = v;
+            return this;
+        }
+
+        public Builder maxHistoryRounds(int v) {
+            this.maxHistoryRounds = v;
+            return this;
+        }
+
+        public Builder maxHistoryTokens(int v) {
+            this.maxHistoryTokens = v;
             return this;
         }
 
