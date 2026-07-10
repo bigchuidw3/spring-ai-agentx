@@ -39,14 +39,19 @@ public class MemoryPersistor {
     private final ChatModel chatModel;
     private final SemanticMemoryManager semanticMemoryManager;
     private final boolean enableProfileMemory;
+    private final int maxHistoryRounds;
+    private final int sessionSummarizeStep;
 
     public MemoryPersistor(MemoryStore memoryStore, ChatModel chatModel,
                     SemanticMemoryManager semanticMemoryManager,
-                    boolean enableProfileMemory, ExecutorService executor) {
+                    boolean enableProfileMemory, int maxHistoryRounds,
+                    int sessionSummarizeStep, ExecutorService executor) {
         this.memoryStore = memoryStore;
         this.chatModel = chatModel;
         this.semanticMemoryManager = semanticMemoryManager;
         this.enableProfileMemory = enableProfileMemory;
+        this.maxHistoryRounds = maxHistoryRounds;
+        this.sessionSummarizeStep = sessionSummarizeStep;
     }
 
     /**
@@ -54,11 +59,14 @@ public class MemoryPersistor {
      */
     public MemoryPersistor(MemoryStore memoryStore, ChatModel chatModel,
                     SemanticMemoryManager semanticMemoryManager,
-                    boolean enableProfileMemory) {
+                    boolean enableProfileMemory, int maxHistoryRounds,
+                    int sessionSummarizeStep) {
         this.memoryStore = memoryStore;
         this.chatModel = chatModel;
         this.semanticMemoryManager = semanticMemoryManager;
         this.enableProfileMemory = enableProfileMemory;
+        this.maxHistoryRounds = maxHistoryRounds;
+        this.sessionSummarizeStep = sessionSummarizeStep;
     }
 
     /**
@@ -118,6 +126,8 @@ public class MemoryPersistor {
             try {
                 semanticMemoryManager.saveQaPair(userId, question, answer, conversationId);
                 semanticMemoryManager.checkAndSummarize(userId);
+                semanticMemoryManager.checkAndSessionSummarize(userId, conversationId,
+                        maxHistoryRounds, sessionSummarizeStep);
                 log.debug("Semantic memory save completed for userId={}", userId);
             } catch (Exception e) {
                 log.error("Semantic memory save failed for userId={}: {}",

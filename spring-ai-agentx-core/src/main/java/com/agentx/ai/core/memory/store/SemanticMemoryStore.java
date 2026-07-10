@@ -14,8 +14,9 @@ import java.util.Objects;
  * 不传入此配置时，语义记忆不启用，只有短期记忆和用户画像。
  *
  * VectorStore 中的 Document 通过 metadata 区分类型：
- * - {@code type: "qa_pair"} — 原始 Q&A 文档（每次对话后异步写入）
- * - {@code type: "summary"} — 摘要文档（达到阈值后合并生成）
+ * - {@code type: "qa_pair"} — 原始 Q&A 文档（每次对话后异步写入，不删除）
+ * - {@code type: "cross_summary"} — 跨会话摘要（达到阈值后合并生成）
+ * - {@code type: "session_summary"} — 单会话溢出摘要（会话轮数超过 maxHistoryRounds 时生成）
  *
  * @author bigchui
  *
@@ -25,8 +26,11 @@ public class SemanticMemoryStore {
     /** 文档元数据中的类型标识：原始 Q&A */
     public static final String DOC_TYPE_QA = "qa_pair";
 
-    /** 文档元数据中的类型标识：摘要 */
-    public static final String DOC_TYPE_SUMMARY = "summary";
+    /** 文档元数据中的类型标识：跨会话摘要 */
+    public static final String DOC_TYPE_CROSS_SUMMARY = "cross_summary";
+
+    /** 文档元数据中的类型标识：单会话溢出摘要 */
+    public static final String DOC_TYPE_SESSION_SUMMARY = "session_summary";
 
     /** 默认摘要触发阈值 */
     public static final int DEFAULT_SUMMARIZE_THRESHOLD = 15;

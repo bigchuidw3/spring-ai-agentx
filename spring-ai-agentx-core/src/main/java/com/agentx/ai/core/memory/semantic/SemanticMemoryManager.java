@@ -2,6 +2,7 @@ package com.agentx.ai.core.memory.semantic;
 
 import com.agentx.ai.core.prompt.PromptConstants;
 import com.agentx.ai.core.memory.store.SemanticMemoryStore;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -17,19 +18,20 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 
 /**
  * 语义记忆管理器。
  *
- * 管理 VectorStore 中 Q&A 文档的存储、检索和摘要合并：
- * - 每次对话结束后，异步保存 Q&A 文档到 VectorStore
- * - 对话开始时，通过语义检索获取相关历史知识
- * - 当 Q&A 文档数量达到阈值时，异步触发摘要合并
- *
- * VectorStore 中的 Document 通过 metadata 区分类型：
- * - {@code type: "qa_pair"} — 原始 Q&A 文档
- * - {@code type: "summary"} — 摘要文档
+ * <h3>三类文档及判断逻辑</h3>
+ * <ul>
+ *   <li><b>qa_pair</b> — 原始 Q&A，永不修改/删除，按 created_at 升序</li>
+ *   <li><b>cross_summary</b> — 跨会话摘要，存 {@code latest_qa_created_at} 水位线
+ *     <br>触发：created_at &gt; 水位线的 qa_pair ≥ summarizeThreshold 条</li>
+ *   <li><b>session_summary</b> — 单会话溢出摘要
+ *     <br>触发：会话 qa_pair 数 &gt; maxHistoryRounds 且溢出量是 step 的整数倍</li>
+ * </ul>
  *
  * @author bigchui
  *
@@ -37,13 +39,22 @@ import java.util.UUID;
 public class SemanticMemoryManager {
 
     private static final Logger log = LoggerFactory.getLogger(SemanticMemoryManager.class);
+    private static final ObjectMapper objectMapper = new ObjectMapper();
 
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
-    /** 摘要生成每批处理的 Q&A 数量，避免单次 LLM 调用超时 */
+    /**
+     * 摘要生成每批处理的 Q&A 数量
+     */
     private static final int SUMMARIZE_BATCH_SIZE = 5;
-    /** 每条 Q&A 内容的字符数上限，超出部分截断 */
+    /**
+     * 每条 Q&A 内容的字符数上限
+     */
     private static final int MAX_QA_CONTENT_LENGTH = 2000;
+    /**
+     * 单次查询 qa_pair 的最大数量
+     */
+    private static final int MAX_QA_QUERY_LIMIT = 50;
 
     private final VectorStore vectorStore;
     private final ChatModel chatModel;
@@ -55,198 +66,301 @@ public class SemanticMemoryManager {
         this.summarizeThreshold = semanticMemoryStore.getSummarizeThreshold();
     }
 
+    // ==================== 公共 API ====================
+
     /**
-     * 保存一组 Q&A 到 VectorStore。
-     *
-     * @param userId         用户标识
-     * @param question       用户问题
-     * @param answer         助手回答
-     * @param conversationId 会话 ID
+     * 保存 Q&A 到 VectorStore（仅写入，不修改）。
      */
     public void saveQaPair(String userId, String question, String answer, String conversationId) {
         String content = "Q: " + question + "\nA: " + answer;
-        Map<String, Object> metadata = buildQaMetadata(userId, conversationId);
         Document doc = Document.builder()
                 .id(UUID.randomUUID().toString())
                 .text(content)
-                .metadata(metadata)
+                .metadata(buildQaMetadata(userId, conversationId))
                 .build();
-
         vectorStore.add(List.of(doc));
         log.debug("Saved Q&A to VectorStore: userId={}, conversationId={}", userId, conversationId);
     }
 
     /**
-     * 语义检索：根据查询获取相关历史知识。
-     *
-     * @param userId 用户标识
-     * @param query  当前查询
-     * @param topK   返回最多 topK 条结果
-     * @return 相关文档列表
+     * 语义检索跨会话全局知识（cross_summary）。
+     * <p>
+     * 按 userId 过滤，用当前 query 做语义相似度检索，取 topK 条相关摘要。
+     * 排除空文本标记文档。
      */
-    public List<Document> search(String userId, String query, int topK) {
-        FilterExpressionBuilder b = new FilterExpressionBuilder();
-        var filter = b.eq("user_id", userId).build();
-
-        SearchRequest request = SearchRequest.builder()
-                .query(query)
-                .topK(topK)
-                .filterExpression(filter)
-                .build();
-
-        return vectorStore.similaritySearch(request);
-    }
-
-    /**
-     * 检查是否达到摘要阈值，如果达到则触发摘要合并。
-     *
-     * <p>循环批量处理：每次取 summarizeThreshold 条 qa_pair 进行摘要，
-     * 处理完后继续检查剩余数量，直到不足阈值为止。
-     * 防止向量库积压大量 qa_pair 时单次调用只处理一批。
-     *
-     * @param userId 用户标识
-     */
-    public void checkAndSummarize(String userId) {
-        int totalProcessed = 0;
-        while (true) {
-            List<Document> qaDocs = findQaPairDocs(userId, summarizeThreshold);
-            if (qaDocs.size() < summarizeThreshold) {
-                log.debug("Q&A document count for userId={}: {}/{}", userId, qaDocs.size(), summarizeThreshold);
-                break;
-            }
-
-            log.info("Summarize threshold reached for userId={}: {} >= {}", userId, qaDocs.size(), summarizeThreshold);
-            summarizeQaPairs(userId, qaDocs);
-            totalProcessed += qaDocs.size();
-        }
-
-        if (totalProcessed > 0) {
-            log.info("Summarization complete for userId={}: {} qa_pairs processed", userId, totalProcessed);
-        }
-    }
-
-    /**
-     * 获取指定用户的 Q&A 文档（限定数量）。
-     *
-     * @param userId 用户标识
-     * @param limit  最大返回数量
-     * @return Q&A 文档列表
-     */
-    private List<Document> findQaPairDocs(String userId, int limit) {
-        FilterExpressionBuilder b = new FilterExpressionBuilder();
-        var filter = b.and(
-                b.eq("user_id", userId),
-                b.eq("type", SemanticMemoryStore.DOC_TYPE_QA)
+    public List<Document> searchCrossSummary(String userId, String query, int topK) {
+        FilterExpressionBuilder fb = new FilterExpressionBuilder();
+        var filter = fb.and(
+                fb.eq("user_id", userId),
+                fb.eq("type", SemanticMemoryStore.DOC_TYPE_CROSS_SUMMARY)
         ).build();
 
-        SearchRequest request = SearchRequest.builder()
-                .query("")
-                .topK(limit)
-                .similarityThreshold(SearchRequest.SIMILARITY_THRESHOLD_ACCEPT_ALL)
-                .filterExpression(filter)
-                .build();
-
-        return vectorStore.similaritySearch(request);
+        return vectorStore.similaritySearch(SearchRequest.builder()
+                        .query(query)
+                        .topK(topK)
+                        .filterExpression(filter)
+                        .build()).stream()
+                .filter(doc -> doc.getText() != null && !doc.getText().isBlank())
+                .limit(topK)
+                .toList();
     }
 
     /**
-     * Q&A 摘要合并流程：LLM 生成新摘要 → 语义搜索相关已有摘要 → 合并 → 保存。
-     *
-     * 核心流程：
-     * 1. LLM 将 qa_pair 批量生成为新摘要
-     * 2. 对每条新摘要，语义搜索主题相关的已有摘要
-     * 3. 如果找到相关摘要 → LLM 合并为一条 → 删除旧摘要，保存合并结果
-     * 4. 如果没有相关摘要 → 直接保存新摘要
-     * 5. 删除原始 qa_pair 文档
-     *
-     * 这样保证：
-     * - 同主题的摘要会被持续合并精炼，不会无限增长
-     * - 不同主题的摘要互不干扰，不会错误合并
+     * 获取当前会话的溢出摘要（session_summary）。
+     * <p>
+     * 每个会话最多一条 session_summary，按 conversationId 精确查找，
+     * 不需要语义检索。
      */
-    private void summarizeQaPairs(String userId, List<Document> qaDocs) {
+    public Document getSessionSummary(String conversationId) {
+        return findSessionSummary(conversationId);
+    }
+
+    /**
+     * 跨会话摘要：水位线 = max(cross_summary.latest_qa_created_at)，
+     * created_at &gt; 水位线的 qa_pair 达到阈值时触发摘要。
+     */
+    public void checkAndSummarize(String userId) {
+        while (true) {
+            List<Document> unprocessedDocs = findUnprocessedQaPairDocs(userId, summarizeThreshold);
+            if (unprocessedDocs.size() < summarizeThreshold) {
+                log.debug("Cross-summary not ready for userId={}: {}/{} unprocessed",
+                        userId, unprocessedDocs.size(), summarizeThreshold);
+                break;
+            }
+            log.info("Cross-summary triggered for userId={}: {} unprocessed",
+                    userId, unprocessedDocs.size());
+            summarizeQaPairs(userId, unprocessedDocs);
+        }
+    }
+
+    /**
+     * 会话溢出摘要（增量合并）。
+     * <p>
+     * 每次只取<b>新增</b>溢出 qa_pair（上次已摘要的跳过），与已有 session_summary
+     * 文本合并后生成新摘要。这样每批 LLM 调用只处理 1 条旧摘要 + step 条新对话，
+     * 上下文有界，不会随溢出量增长。
+     */
+    public void checkAndSessionSummarize(String userId, String conversationId,
+                                         int maxHistoryRounds, int step) {
+        if (maxHistoryRounds <= 0 || step <= 0) {
+            return;
+        }
         try {
-            // 1. LLM 从 qa_pair 生成新摘要
-            List<String> newSummaries = generateSummaries(qaDocs);
-            if (newSummaries.isEmpty()) {
-                log.debug("No valuable summaries generated for userId={}", userId);
-                // 即使没有生成有价值的摘要，也删除原始 qa_pair
-                deleteDocs(qaDocs);
+            List<Document> qaDocs = findQaPairDocsByConversation(conversationId);
+            int overflowCount = qaDocs.size() - maxHistoryRounds;
+            if (overflowCount <= 0 || overflowCount % step != 0) {
                 return;
             }
 
-            log.info("Generated {} new summaries from {} qa_pairs for userId={}",
+            // 查找已有 session_summary，获取已摘要条数
+            Document existingSummary = findSessionSummary(conversationId);
+            int previousSourceCount = 0;
+            String existingText = null;
+            if (existingSummary != null) {
+                Object sc = existingSummary.getMetadata().get("source_count");
+                previousSourceCount = sc instanceof Number ? ((Number) sc).intValue() : 0;
+                existingText = existingSummary.getText();
+            }
+
+            // 只取增量部分（新溢出的 qa_pair）
+            List<Document> newOverflowDocs = qaDocs.subList(previousSourceCount, overflowCount);
+
+            log.info("Session summary triggered: conversationId={}, total={}, overflow={}, "
+                            + "previousSourceCount={}, newBatch={}, step={}",
+                    conversationId, qaDocs.size(), overflowCount,
+                    previousSourceCount, newOverflowDocs.size(), step);
+
+            String sessionSummary = generateSessionSummary(existingText, newOverflowDocs);
+            if (sessionSummary == null || sessionSummary.isBlank()) {
+                return;
+            }
+            deleteSessionSummaries(conversationId);
+            vectorStore.add(List.of(Document.builder()
+                    .id(UUID.randomUUID().toString())
+                    .text(sessionSummary)
+                    .metadata(buildSessionSummaryMetadata(userId, conversationId, overflowCount))
+                    .build()));
+            log.info("Session summary saved: conversationId={}, totalOverflow={}",
+                    conversationId, overflowCount);
+        } catch (Exception e) {
+            log.error("Session summarization failed for conversationId={}: {}",
+                    conversationId, e.getMessage(), e);
+        }
+    }
+
+    // ==================== 未处理 qa_pair 查找 ====================
+
+    /**
+     * 取所有 cross_summary 的 latest_qa_created_at 最大值作为水位线，
+     * qa_pair.created_at &gt; 水位线的即为未处理。
+     */
+    private List<Document> findUnprocessedQaPairDocs(String userId, int limit) {
+        String watermark = getCrossSummaryWatermark(userId);
+        List<Document> allQaDocs = findAllQaPairDocs(userId);
+
+        return allQaDocs.stream()
+                .filter(doc -> {
+                    String ca = (String) doc.getMetadata().get("created_at");
+                    return watermark == null || watermark.isEmpty() || ca.compareTo(watermark) > 0;
+                })
+                .limit(limit)
+                .toList();
+    }
+
+    private String getCrossSummaryWatermark(String userId) {
+        String watermark = null;
+        for (Document doc : findAllCrossSummaryDocs(userId)) {
+            String latest = (String) doc.getMetadata().get("latest_qa_created_at");
+            if (latest != null && (watermark == null || latest.compareTo(watermark) > 0)) {
+                watermark = latest;
+            }
+        }
+        return watermark;
+    }
+
+    /**
+     * 获取指定用户的所有 qa_pair（按 created_at 升序）。
+     */
+    private List<Document> findAllQaPairDocs(String userId) {
+        FilterExpressionBuilder fb = new FilterExpressionBuilder();
+        var filter = fb.and(
+                fb.eq("user_id", userId),
+                fb.eq("type", SemanticMemoryStore.DOC_TYPE_QA)
+        ).build();
+
+        List<Document> docs = new ArrayList<>(vectorStore.similaritySearch(SearchRequest.builder()
+                .query("all qa pairs")
+                .topK(MAX_QA_QUERY_LIMIT)
+                .similarityThreshold(SearchRequest.SIMILARITY_THRESHOLD_ACCEPT_ALL)
+                .filterExpression(filter)
+                .build()));
+        sortByCreatedAt(docs);
+        return docs;
+    }
+
+    /**
+     * 获取指定用户的所有 cross_summary 文档。
+     */
+    private List<Document> findAllCrossSummaryDocs(String userId) {
+        FilterExpressionBuilder fb = new FilterExpressionBuilder();
+        var filter = fb.and(
+                fb.eq("user_id", userId),
+                fb.eq("type", SemanticMemoryStore.DOC_TYPE_CROSS_SUMMARY)
+        ).build();
+
+        return vectorStore.similaritySearch(SearchRequest.builder()
+                .query("all cross summaries")
+                .topK(200)
+                .similarityThreshold(SearchRequest.SIMILARITY_THRESHOLD_ACCEPT_ALL)
+                .filterExpression(filter)
+                .build());
+    }
+
+    /**
+     * 获取指定会话的 qa_pair（按 created_at 升序，session_summary 专用）。
+     */
+    private List<Document> findQaPairDocsByConversation(String conversationId) {
+        FilterExpressionBuilder fb = new FilterExpressionBuilder();
+        var filter = fb.and(
+                fb.eq("conversation_id", conversationId),
+                fb.eq("type", SemanticMemoryStore.DOC_TYPE_QA)
+        ).build();
+
+        List<Document> docs = new ArrayList<>(vectorStore.similaritySearch(SearchRequest.builder()
+                .query("all qa pairs")
+                .topK(MAX_QA_QUERY_LIMIT)
+                .similarityThreshold(SearchRequest.SIMILARITY_THRESHOLD_ACCEPT_ALL)
+                .filterExpression(filter)
+                .build()));
+        sortByCreatedAt(docs);
+        return docs;
+    }
+
+    // ==================== 摘要生成与合并 ====================
+
+    /**
+     * Q&A → 摘要：生成 → 语义匹配已有摘要 → 合并 → 保存 → 删除旧摘要。
+     * qa_pair 本身不动。即使 LLM 无产出，也写入标记文档推进水位线。
+     */
+    private void summarizeQaPairs(String userId, List<Document> qaDocs) {
+        try {
+            // 本批 qa_pair 的最新 created_at（水位线推进到此）
+            String batchWatermark = qaDocs.stream()
+                    .map(d -> (String) d.getMetadata().get("created_at"))
+                    .filter(Objects::nonNull)
+                    .max(String::compareTo)
+                    .orElse(null);
+
+            List<String> newSummaries = generateSummaries(qaDocs);
+
+            if (newSummaries.isEmpty()) {
+                log.debug("No valuable summaries for userId={}, advancing watermark to {}",
+                        userId, batchWatermark);
+                vectorStore.add(List.of(
+                        buildCrossSummaryDoc(userId, "", batchWatermark)));
+                return;
+            }
+
+            log.info("Generated {} summaries from {} qa_pairs for userId={}",
                     newSummaries.size(), qaDocs.size(), userId);
 
-            // 2. 对每条新摘要，查找相关的已有摘要并合并
-            List<String> idsToDelete = new ArrayList<>();
             List<Document> docsToSave = new ArrayList<>();
+            List<String> idsToDelete = new ArrayList<>();
 
             for (String newSummary : newSummaries) {
-                // 语义搜索相关的已有摘要
                 List<Document> relatedSummaries = findRelatedSummaries(userId, newSummary);
 
                 if (relatedSummaries.isEmpty()) {
-                    // 无相关摘要 → 直接保存新摘要
-                    docsToSave.add(buildSummaryDoc(userId, newSummary, 1));
+                    docsToSave.add(buildCrossSummaryDoc(userId, newSummary, batchWatermark));
                 } else {
-                    // 有相关摘要 → LLM 合并
-                    log.debug("Found {} related summaries to merge for userId={}",
+                    log.debug("Merging {} related summaries for userId={}",
                             relatedSummaries.size(), userId);
                     String merged = mergeSummaries(newSummary, relatedSummaries);
+                    // 合并水位线：取最大值
+                    String mergedWatermark = maxWatermark(batchWatermark, relatedSummaries);
                     relatedSummaries.stream().map(Document::getId).forEach(idsToDelete::add);
-                    docsToSave.add(buildSummaryDoc(userId, merged, 1 + relatedSummaries.size()));
+                    docsToSave.add(buildCrossSummaryDoc(userId, merged, mergedWatermark));
                 }
             }
 
-            // 3. 删除原始 qa_pair + 被合并的旧摘要
-            qaDocs.stream().map(Document::getId).forEach(idsToDelete::add);
             if (!idsToDelete.isEmpty()) {
                 vectorStore.delete(idsToDelete);
-                log.info("Deleted {} documents for userId={} ({} qa_pairs + {} merged summaries)",
-                        idsToDelete.size(), userId, qaDocs.size(),
-                        idsToDelete.size() - qaDocs.size());
             }
-
-            // 4. 保存新摘要（合并后或直接保存的）
             vectorStore.add(docsToSave);
-            log.info("Saved {} summaries for userId={}", docsToSave.size(), userId);
+            log.info("Saved {} cross_summary docs, deleted {} old for userId={}",
+                    docsToSave.size(), idsToDelete.size(), userId);
 
         } catch (Exception e) {
             log.error("Summarization failed for userId={}: {}", userId, e.getMessage(), e);
         }
     }
 
-    /**
-     * 语义搜索：根据文本查找相关的已有摘要。
-     *
-     * @param userId       用户标识
-     * @param summaryText  新摘要文本（用作查询）
-     * @return 主题相关的已有摘要列表
-     */
+    private String maxWatermark(String batchWatermark, List<Document> relatedSummaries) {
+        String max = batchWatermark;
+        for (Document doc : relatedSummaries) {
+            String latest = (String) doc.getMetadata().get("latest_qa_created_at");
+            if (latest != null && (max == null || latest.compareTo(max) > 0)) {
+                max = latest;
+            }
+        }
+        return max;
+    }
+
     private List<Document> findRelatedSummaries(String userId, String summaryText) {
-        FilterExpressionBuilder b = new FilterExpressionBuilder();
-        var filter = b.and(
-                b.eq("user_id", userId),
-                b.eq("type", SemanticMemoryStore.DOC_TYPE_SUMMARY)
+        FilterExpressionBuilder fb = new FilterExpressionBuilder();
+        var filter = fb.and(
+                fb.eq("user_id", userId),
+                fb.eq("type", SemanticMemoryStore.DOC_TYPE_CROSS_SUMMARY)
         ).build();
 
-        SearchRequest request = SearchRequest.builder()
+        return vectorStore.similaritySearch(SearchRequest.builder()
                 .query(summaryText)
                 .topK(5)
                 .similarityThreshold(0.5)
                 .filterExpression(filter)
-                .build();
-
-        return vectorStore.similaritySearch(request);
+                .build());
     }
 
-    /**
-     * LLM 合并新摘要与相关已有摘要。
-     *
-     * @param newSummary       新生成的摘要
-     * @param relatedSummaries 语义相关的已有摘要
-     * @return 合并后的摘要文本
-     */
     private String mergeSummaries(String newSummary, List<Document> relatedSummaries) {
         StringBuilder sb = new StringBuilder();
         sb.append("## 新摘要\n").append(newSummary).append("\n\n");
@@ -267,27 +381,81 @@ public class SemanticMemoryManager {
         return result != null ? result.trim() : newSummary;
     }
 
-    private Document buildSummaryDoc(String userId, String summaryText, int sourceCount) {
-        return Document.builder()
-                .id(UUID.randomUUID().toString())
-                .text(summaryText)
-                .metadata(buildSummaryMetadata(userId, sourceCount))
-                .build();
+    /**
+     * 增量生成会话摘要。
+     *
+     * @param existingSummary 已有 session_summary 文本（首次为 null）
+     * @param newOverflowDocs 本次新增的溢出 qa_pair（固定 step 条）
+     */
+    private String generateSessionSummary(String existingSummary, List<Document> newOverflowDocs) {
+        StringBuilder sb = new StringBuilder();
+
+        if (existingSummary != null && !existingSummary.isBlank()) {
+            sb.append("## 已有会话摘要\n");
+            sb.append(existingSummary).append("\n\n");
+        }
+
+        sb.append("## 本轮新增对话\n");
+        for (int i = 0; i < newOverflowDocs.size(); i++) {
+            String text = newOverflowDocs.get(i).getText();
+            if (text != null && text.length() > MAX_QA_CONTENT_LENGTH) {
+                text = text.substring(0, MAX_QA_CONTENT_LENGTH) + "...";
+            }
+            sb.append("### 对话 ").append(i + 1).append("\n");
+            sb.append(text != null ? text : "").append("\n\n");
+        }
+
+        String userPrompt = existingSummary != null
+                ? "请将以下「已有会话摘要」与「本轮新增对话」合并为一份完整的会话摘要：\n\n" + sb
+                : "以下是需要压缩的对话：\n\n" + sb;
+
+        String result = ChatClient.builder(chatModel)
+                .build()
+                .prompt()
+                .system(PromptConstants.SESSION_SUMMARIZATION_PROMPT)
+                .user(userPrompt)
+                .call()
+                .content();
+
+        return result != null ? result.trim() : null;
     }
 
-    private void deleteDocs(List<Document> docs) {
-        List<String> ids = docs.stream().map(Document::getId).toList();
-        if (!ids.isEmpty()) {
-            vectorStore.delete(ids);
+    private Document findSessionSummary(String conversationId) {
+        FilterExpressionBuilder fb = new FilterExpressionBuilder();
+        var filter = fb.and(
+                fb.eq("conversation_id", conversationId),
+                fb.eq("type", SemanticMemoryStore.DOC_TYPE_SESSION_SUMMARY)
+        ).build();
+
+        List<Document> docs = vectorStore.similaritySearch(SearchRequest.builder()
+                .query("")
+                .topK(1)
+                .similarityThreshold(SearchRequest.SIMILARITY_THRESHOLD_ACCEPT_ALL)
+                .filterExpression(filter)
+                .build());
+        return docs.isEmpty() ? null : docs.get(0);
+    }
+
+    private void deleteSessionSummaries(String conversationId) {
+        FilterExpressionBuilder fb = new FilterExpressionBuilder();
+        var filter = fb.and(
+                fb.eq("conversation_id", conversationId),
+                fb.eq("type", SemanticMemoryStore.DOC_TYPE_SESSION_SUMMARY)
+        ).build();
+
+        List<Document> existing = vectorStore.similaritySearch(SearchRequest.builder()
+                .query("")
+                .topK(1)
+                .similarityThreshold(SearchRequest.SIMILARITY_THRESHOLD_ACCEPT_ALL)
+                .filterExpression(filter)
+                .build());
+        if (!existing.isEmpty()) {
+            vectorStore.delete(existing.stream().map(Document::getId).toList());
         }
     }
 
-    /**
-     * 分批使用 LLM 将 Q&A 文档合并为摘要。
-     *
-     * <p>每批 {@link #SUMMARIZE_BATCH_SIZE} 条，每条内容截断至
-     * {@link #MAX_QA_CONTENT_LENGTH} 字符，避免单次 LLM 调用超时。
-     */
+    // ==================== 批量 LLM 摘要 ====================
+
     private List<String> generateSummaries(List<Document> qaDocs) {
         List<String> allSummaries = new ArrayList<>();
 
@@ -314,8 +482,7 @@ public class SemanticMemoryManager {
                         .call()
                         .content();
 
-                List<String> batchSummaries = parseSummaries(result);
-                allSummaries.addAll(batchSummaries);
+                allSummaries.addAll(parseSummaries(result));
                 log.debug("Summarized batch {}-{} of {} qa_pairs", start + 1, end, qaDocs.size());
             } catch (Exception e) {
                 log.error("Summarization failed for batch {}-{}: {}", start + 1, end, e.getMessage());
@@ -325,16 +492,12 @@ public class SemanticMemoryManager {
         return allSummaries;
     }
 
-    /**
-     * 解析 LLM 返回的摘要 JSON 数组。
-     */
     private List<String> parseSummaries(String jsonResult) {
         if (jsonResult == null || jsonResult.isBlank()) {
             return List.of();
         }
 
         String json = jsonResult.trim();
-        // 处理 markdown code block
         if (json.startsWith("```")) {
             int start = json.indexOf('\n') + 1;
             int end = json.lastIndexOf("```");
@@ -343,29 +506,21 @@ public class SemanticMemoryManager {
             }
         }
 
-        // 简单的 JSON 数组解析（避免引入额外依赖）
         if (!json.startsWith("[") || !json.endsWith("]")) {
-            log.warn("Invalid summary JSON format, skipping: {}", json.substring(0, Math.min(200, json.length())));
+            log.warn("Invalid summary JSON format: {}", json.substring(0, Math.min(200, json.length())));
             return List.of();
         }
 
         try {
-            List<String> summaries = new ArrayList<>();
-            // 手动解析简单的字符串数组
-            String inner = json.substring(1, json.length() - 1).trim();
-            if (inner.isEmpty()) {
-                return List.of();
-            }
-
-            // 使用 com.fasterxml.jackson 解析
-            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-            List<String> parsed = mapper.readValue(json, mapper.getTypeFactory().constructCollectionType(List.class, String.class));
-            return parsed;
+            return objectMapper.readValue(json,
+                    objectMapper.getTypeFactory().constructCollectionType(List.class, String.class));
         } catch (Exception e) {
             log.error("Failed to parse summaries: {}", e.getMessage());
             return List.of();
         }
     }
+
+    // ==================== Metadata 构建 ====================
 
     private Map<String, Object> buildQaMetadata(String userId, String conversationId) {
         Map<String, Object> metadata = new HashMap<>();
@@ -376,12 +531,38 @@ public class SemanticMemoryManager {
         return metadata;
     }
 
-    private Map<String, Object> buildSummaryMetadata(String userId, int sourceCount) {
+    private Document buildCrossSummaryDoc(String userId, String summaryText, String latestQaCreatedAt) {
+        return Document.builder()
+                .id(UUID.randomUUID().toString())
+                .text(summaryText)
+                .metadata(Map.of(
+                        "type", SemanticMemoryStore.DOC_TYPE_CROSS_SUMMARY,
+                        "user_id", userId,
+                        "latest_qa_created_at", latestQaCreatedAt != null ? latestQaCreatedAt : "",
+                        "created_at", LocalDateTime.now().format(DATE_FORMATTER)))
+                .build();
+    }
+
+    private Map<String, Object> buildSessionSummaryMetadata(String userId, String conversationId, int sourceCount) {
         Map<String, Object> metadata = new HashMap<>();
-        metadata.put("type", SemanticMemoryStore.DOC_TYPE_SUMMARY);
+        metadata.put("type", SemanticMemoryStore.DOC_TYPE_SESSION_SUMMARY);
         metadata.put("user_id", userId);
+        metadata.put("conversation_id", conversationId);
         metadata.put("source_count", sourceCount);
         metadata.put("created_at", LocalDateTime.now().format(DATE_FORMATTER));
         return metadata;
+    }
+
+    // ==================== 工具方法 ====================
+
+    private static void sortByCreatedAt(List<Document> docs) {
+        docs.sort((a, b) -> {
+            String ta = (String) a.getMetadata().get("created_at");
+            String tb = (String) b.getMetadata().get("created_at");
+            if (ta == null && tb == null) return 0;
+            if (ta == null) return -1;
+            if (tb == null) return 1;
+            return ta.compareTo(tb);
+        });
     }
 }

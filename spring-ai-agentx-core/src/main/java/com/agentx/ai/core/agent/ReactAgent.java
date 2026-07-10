@@ -90,6 +90,7 @@ public class ReactAgent {
     private final PauseStateStore stateStore;
     private final int maxHistoryRounds;
     private final int maxHistoryTokens;
+    private final int sessionSummarizeStep;
 
     private ReactAgent(Builder builder, ChatMemory chatMemory, MemoryStore memoryStore,
                        SemanticMemoryManager semanticMemoryManager, TraceStore traceStore,
@@ -97,6 +98,7 @@ public class ReactAgent {
         this.deferredToolRegistry = builder.deferredToolRegistry;
         this.maxHistoryRounds = builder.maxHistoryRounds;
         this.maxHistoryTokens = builder.maxHistoryTokens;
+        this.sessionSummarizeStep = builder.sessionSummarizeStep;
 
         // 构建 ChatClient，统一配置工具选项和 Advisors
         ChatClient.Builder clientBuilder = ChatClient.builder(builder.chatModel);
@@ -177,7 +179,8 @@ public class ReactAgent {
                 .maxRetries(maxRetries)
                 .advisors(advisors)
                 .maxHistoryRounds(maxHistoryRounds)
-                .maxHistoryTokens(maxHistoryTokens);
+                .maxHistoryTokens(maxHistoryTokens)
+                .sessionSummarizeStep(sessionSummarizeStep);
 
         // 上下文压缩（可选）
         if (this.contextPolicy != null) {
@@ -552,6 +555,7 @@ public class ReactAgent {
         private PauseStateStore stateStore;
         private int maxHistoryRounds = 30;
         private int maxHistoryTokens = 10000;
+        private int sessionSummarizeStep = 5;
         private final List<Supplier<ReactAgent>> subAgentProviders = new ArrayList<>();
 
         public Builder name(String name) {
@@ -948,6 +952,22 @@ public class ReactAgent {
          */
         public Builder maxHistoryTokens(int maxHistoryTokens) {
             this.maxHistoryTokens = maxHistoryTokens;
+            return this;
+        }
+
+        /**
+         * 设置会话溢出摘要的步长，默认 5。
+         * <p>
+         * 当会话 qa_pair 数量超过 {@link #maxHistoryRounds(int)} 后，
+         * 每累积 step 条溢出轮次才触发一次 session_summary 重新生成，
+         * 避免相邻轮次频繁触发摘要。
+         * <p>
+         * 例如 maxHistoryRounds=30, step=5：第 35、40、45... 轮时触发。
+         *
+         * @param step 摘要步长，≤ 0 时关闭会话溢出摘要
+         */
+        public Builder sessionSummarizeStep(int step) {
+            this.sessionSummarizeStep = step;
             return this;
         }
 

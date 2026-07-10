@@ -74,7 +74,6 @@ public class LoopMessageBuilder {
         }
 
         systemPrompt = appendSection(systemPrompt, memoryInjector.buildMemorySection(params));
-        systemPrompt = appendSection(systemPrompt, memoryInjector.buildSemanticSection(params, query));
 
         // 注入自定义参数
         String customParamSection = buildCustomParamSection(params);
@@ -92,6 +91,18 @@ public class LoopMessageBuilder {
 
         if (!systemPrompt.isEmpty()) {
             messages.add(new SystemMessage(systemPrompt));
+        }
+
+        // 记忆区块：每条记忆一个 Q&A 对，放在短期历史上方
+        String crossSection = memoryInjector.buildCrossSummarySection(params, query);
+        if (!crossSection.isEmpty()) {
+            messages.add(new UserMessage("当前跨会话的全局知识"));
+            messages.add(new AssistantMessage(crossSection));
+        }
+        String sessionSection = memoryInjector.buildSessionSummarySection(params);
+        if (!sessionSection.isEmpty()) {
+            messages.add(new UserMessage("当前会话的历史摘要"));
+            messages.add(new AssistantMessage(sessionSection));
         }
 
         String conversationId = params != null ? params.getConversationId() : null;

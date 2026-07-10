@@ -156,7 +156,8 @@ public class AgentLoopExecutor {
         // 记忆持久化器
         this.memoryPersistor = new MemoryPersistor(
                 builder.memoryStore, builder.chatModel,
-                builder.semanticMemoryManager, builder.enableProfileMemory);
+                builder.semanticMemoryManager, builder.enableProfileMemory,
+                builder.maxHistoryRounds, builder.sessionSummarizeStep);
 
         // 消息构建器
         boolean hasTodoWrite = map.containsKey("TodoWrite");
@@ -199,6 +200,7 @@ public class AgentLoopExecutor {
         private PauseStateStore stateStore;
         private int maxHistoryRounds = 30;
         private int maxHistoryTokens = 10000;
+        private int sessionSummarizeStep = 5;
 
         public Builder chatClient(ChatClient v) {
             this.chatClient = v;
@@ -312,6 +314,11 @@ public class AgentLoopExecutor {
 
         public Builder maxHistoryTokens(int v) {
             this.maxHistoryTokens = v;
+            return this;
+        }
+
+        public Builder sessionSummarizeStep(int v) {
+            this.sessionSummarizeStep = v;
             return this;
         }
 

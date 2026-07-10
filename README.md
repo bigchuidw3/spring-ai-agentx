@@ -48,7 +48,7 @@ Spring AI AgentX 是一款面向 Java 开发者的 AI Agent 开发框架。基�
 | 统一工具调度 | 原生支持 Function Calling / MCP，工具执行由框架统一接管 |
 | 运行时参数注入 | 通过 RunnableParams 动态覆盖工具参数，精准控制工具行为 |
 | 任务管理与执行控制 | 会话级并发控制与中断机制，保障同一会话执行的有序性与可控性 |
-| 分层记忆体系 | 短期记忆、用户画像、长期记忆（RAG）三层结构，多粒度上下文管理 |
+| 分层记忆体系 | 短期记忆、会话摘要、全局知识三层结构，多粒度上下文管理 |
 | 分阶段输出 | StageOutputProvider SPI，在 Agent 生命周期钩子点注入自定义输出 |
 | Human-in-the-Loop | 暂停/恢复机制，支持输入工具与操作工具，支持自定义用户输入工具 |
 | 内置工具能力集 | Bash、文件系统、文本检索（Grep）、Python 等通用工具 |
@@ -212,7 +212,7 @@ String answer = agent.call("帮我设计一个订单系统的架构");
 ```
 ### 6. 数据持久化与精细控制
 
-传入 `DataSource` 后，框架自动创建三张表并启用对应能力。通过 `enableXXX` 参数可独立控制每一项（均默认为 `true`）：
+传入 `DataSource` 后，框架自动创建 `agentx_session` 和 `agentx_trace` 表。通过 `enableXXX` 参数可独立控制每一项（均默认为 `true`）：
 
 ```java
 ReactAgent agent = ReactAgent.builder()
@@ -220,7 +220,6 @@ ReactAgent agent = ReactAgent.builder()
         .dataSource(dataSource)
         .enableSession(true)            // 会话历史（agentx_session），默认 true
         .enableTrace(true)              // 调用审计（agentx_trace），默认 true
-        .enableProfileMemory(true)      // 用户画像（agentx_memory），默认 true
         .build();
 ```
 
@@ -228,9 +227,8 @@ ReactAgent agent = ReactAgent.builder()
 |------|----------|----------|
 | `enableSession` | 对话历史保存与加载 | SubAgent 等无状态场景（框架自动关闭） |
 | `enableTrace` | LLM 调用链路审计 | 不需要调用追踪时 |
-| `enableProfileMemory` | 用户画像自动提取与注入 | 安全要求高，防止诱导生成记忆 |
 
-> **SubAgent 说明**：子 Agent 无需传 DataSource，框架自动注入父 Agent 的 TraceStore（trace 跟随父开关），session 和 profile memory 自动关闭。详见 [18-SubAgent子代理](docs/core/18-SubAgent子代理.md)。
+> **SubAgent 说明**：子 Agent 无需传 DataSource，框架自动注入父 Agent 的 TraceStore（trace 跟随父开关），session 自动关闭。详见 [18-SubAgent子代理](docs/core/18-SubAgent子代理.md)。
 
 ---
 
@@ -244,7 +242,7 @@ ReactAgent agent = ReactAgent.builder()
 | 2 | 工具与 MCP | 内置工具、自定义工具、MCP 协议支持 | [02-工具与MCP](docs/core/02-工具与MCP.md) |
 | 3 | 动态会话参数 | RunnableParams、addParam / addToolParam 参数注入 | [03-动态会话参数](docs/core/03-动态会话参数.md) |
 | 4 | 任务管理与并发控制 | 会话级并发控制、外部中断 | [04-任务管理与并发控制](docs/core/04-任务管理与并发控制.md) |
-| 5 | 分层记忆体系 | 短期记忆、用户画像、长期记忆三层架构 | [05-分层记忆体系](docs/core/05-分层记忆体系.md) |
+| 5 | 分层记忆体系 | 短期记忆、会话摘要、全局知识三层架构 | [05-分层记忆体系](docs/core/05-分层记忆体系.md) |
 | 6 | 分阶段输出 | StageOutputProvider SPI，三阶段钩子 | [06-分阶段输出](docs/core/06-分阶段输出.md) |
 | 7 | Human-in-the-Loop | 暂停/恢复机制，用户输入工具与操作审批 | [07-Human-in-the-Loop](docs/core/07-Human-in-the-Loop.md) |
 | 8 | Skills 技能体系 | 渐进式披露，按需加载技能 | [08-Skills技能体系](docs/core/08-Skills技能体系.md) |
@@ -290,7 +288,7 @@ cp secrets.properties.example secrets.properties
 | `HumanInTheLoopTest` | Human-in-the-Loop | 暂停/恢复、ask_user、操作审批 |
 | `StageOutputTest` | 分阶段输出 | StageOutputProvider、多时机钩子、Think 标签 |
 | `ThinkingModeTest` | 思考模型适配 | REASONING_CONTENT / THINK_TAG / DISABLED 三种模式 |
-| `MemoryTest` | 分层记忆体系 | 短期记忆、用户画像、长期记忆 |
+| `MemoryTest` | 分层记忆体系 | 短期记忆、会话摘要、全局知识 |
 | `ContextManagementTest` | 上下文压缩 | 默认配置、自定义配置、保护工具 |
 | `FullIntegrationTest` | 完整集成 | 三层记忆 + Skills + 全量工具 |
 | `ToolSearchTest` | ToolSearch 工具检索 | 同步/流式调用、Session 隔离验证 |
@@ -320,7 +318,7 @@ cp secrets.properties.example secrets.properties
 - [x] 统一工具调度 — 原生支持 Function Calling / MCP，框架统一接管执行
 - [x] 运行时参数注入 — RunnableParams 动态覆盖工具参数
 - [x] 任务管理与执行控制 — 会话级并发控制与中断机制
-- [x] 分层记忆体系 — 短期记忆、用户画像、长期记忆（RAG）
+- [x] 分层记忆体系 — 短期记忆、会话摘要、全局知识（RAG）
 - [x] Human-in-the-Loop — Agent 主动提问与操作审批，暂停/恢复执行
 - [x] 阶段式输出 — StageOutputProvider SPI，三种钩子时机
 - [x] 内置工具能力集 — Bash、文件系统、Grep、Python
@@ -336,7 +334,7 @@ cp secrets.properties.example secrets.properties
 
 - [x] TodoWrite 任务追踪 — 结构化任务列表工具，流式 TodoProgress 进度事件
 - [x] TraceAudit 追踪审计 — `agentx_trace` 表记录每轮 LLM 调用请求/响应/Token，Complete 事件携带 token 累计，支持大模型调用链路审计
-- [x] SubAgent 子代理 — 主 Agent 委派任务给专门的子 Agent，独立 context window，流式事件转发（SubAgentSource 来源标识），自动继承父 Agent trace 审计，框架自动禁用 session/profile memory
+- [x] SubAgent 子代理 — 主 Agent 委派任务给专门的子 Agent，独立 context window，流式事件转发（SubAgentSource 来源标识），自动继承父 Agent trace 审计，框架自动禁用 session
 - [x] 中断与恢复 — 统一 HITL/Interrupt 两种暂停机制，call/stream 双模式，`PauseState` 快照持久化到 `agentx_pause_state` 表，跨进程断点续执
 
 ### v1.0.0-M3（规划中）
