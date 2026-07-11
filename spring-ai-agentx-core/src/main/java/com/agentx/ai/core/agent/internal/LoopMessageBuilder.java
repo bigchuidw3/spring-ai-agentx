@@ -93,16 +93,19 @@ public class LoopMessageBuilder {
             messages.add(new SystemMessage(systemPrompt));
         }
 
-        // 记忆区块：每条记忆一个 Q&A 对，放在短期历史上方
+        // 记忆区块：合并为一条 UserMessage，作为背景参考放在短期历史上方
         String crossSection = memoryInjector.buildCrossSummarySection(params, query);
-        if (!crossSection.isEmpty()) {
-            messages.add(new UserMessage("当前跨会话的全局知识"));
-            messages.add(new AssistantMessage(crossSection));
-        }
         String sessionSection = memoryInjector.buildSessionSummarySection(params);
-        if (!sessionSection.isEmpty()) {
-            messages.add(new UserMessage("当前会话的历史摘要"));
-            messages.add(new AssistantMessage(sessionSection));
+        if (!sessionSection.isEmpty() || !crossSection.isEmpty()) {
+            StringBuilder memoryContext = new StringBuilder();
+            memoryContext.append("以下是本次对话的相关背景信息，供参考：\n\n");
+            if (!sessionSection.isEmpty()) {
+                memoryContext.append(sessionSection).append("\n\n");
+            }
+            if (!crossSection.isEmpty()) {
+                memoryContext.append(crossSection);
+            }
+            messages.add(new UserMessage(memoryContext.toString().trim()));
         }
 
         String conversationId = params != null ? params.getConversationId() : null;
