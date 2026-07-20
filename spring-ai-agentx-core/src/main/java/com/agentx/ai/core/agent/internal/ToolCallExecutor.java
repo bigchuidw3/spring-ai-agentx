@@ -85,13 +85,14 @@ public class ToolCallExecutor {
             argsJson = "{}";
         }
 
-        argsJson = replaceToolParams(argsJson, params);
-
         ToolCallback callback = toolMap.get(toolName);
 
         if (callback == null) {
             return errorResult(toolName, "不存在名为 '" + toolName + "' 的工具");
         }
+
+        // 先按工具的 inputSchema 过滤，只注入该工具真实声明的字段（避免 MCP 服务端严格校验报错）
+        argsJson = replaceToolParams(callback, argsJson, params);
 
         log.debug("Executing tool: {} with args: {}", toolName, argsJson);
 
@@ -280,7 +281,7 @@ public class ToolCallExecutor {
     // ==================== 参数替换 ====================
 
     /**
-     * 把 RunnableParams.toolParams 强制合并进 LLM 生成的工具调用 args。
+     * 把 RunnableParams.toolParams 合并进 LLM 生成的工具调用 args，**仅注入工具 inputSchema 真实声明的字段**。
      * <p>
      * 三种情况都覆盖：
      * <ul>
@@ -291,9 +292,12 @@ public class ToolCallExecutor {
      * 用 JSON merge 而非正则替换：能正确处理非 String 类型（Number/Boolean），
      * 且不依赖 LLM 是否在 args 里写了字段名。
      * <p>
-     * 多余的 key（不在方法签名里的）由 Spring AI 的 MethodToolCallback 忽略，不会报错。
+     * <b>白名单过滤</b>：本地 {@code @Tool} 注解工具（MethodToolCallback）会忽略未知字段，
+     * 但 MCP 工具走远程 JSON-RPC，服务端常严格校验（如 Tavily 用 Pydantic，多字段即报
+     * {@code unexpected_keyword_argument}）。因此从 callback 的 inputSchema 读出合法参数名清单，
+     * 只注入该工具声明的字段，未声明的跳过。
      */
-    private String replaceToolParams(String argsJson, RunnableParams params) {
+    private String replaceToolParams(ToolCallback callback, String argsJson, RunnableParams params) {
         if (params == null || params.getToolParams() == null || params.getToolParams().isEmpty()) {
             return argsJson;
         }
@@ -301,14 +305,57 @@ public class ToolCallExecutor {
             return argsJson;
         }
 
+        Set<String> accepted = getAcceptedParamNames(callback);
+        if (accepted.isEmpty()) {
+            // 拿不到 schema（异常或无 properties）→ 保守起见不注入，避免污染 MCP 严格校验工具
+            log.debug("工具 {} 的 inputSchema 无 properties，跳过 toolParams 注入", callback.getToolDefinition().name());
+            return argsJson;
+        }
+
         try {
             Map<String, Object> args = objectMapper.readValue(argsJson,
                     new TypeReference<Map<String, Object>>() {});
-            args.putAll(params.getToolParams());
+            for (Map.Entry<String, Object> entry : params.getToolParams().entrySet()) {
+                if (accepted.contains(entry.getKey())) {
+                    args.put(entry.getKey(), entry.getValue());
+                } else {
+                    log.debug("工具 {} 不接受参数 {}，跳过注入", callback.getToolDefinition().name(), entry.getKey());
+                }
+            }
             return objectMapper.writeValueAsString(args);
         } catch (Exception e) {
             log.error("替换工具参数失败（argsJson 不是合法 JSON，原样返回）: {}", argsJson, e);
             return argsJson;
+        }
+    }
+
+    /**
+     * 从 ToolCallback 的 inputSchema 读出合法参数名集合。
+     * schema 形如 {"type":"object","properties":{"sql":{...},"userId":{...}}}。
+     */
+    private Set<String> getAcceptedParamNames(ToolCallback callback) {
+        try {
+            String schemaJson = callback.getToolDefinition().inputSchema();
+            if (schemaJson == null || schemaJson.isBlank()) {
+                return Set.of();
+            }
+            Map<String, Object> schema = objectMapper.readValue(schemaJson,
+                    new TypeReference<Map<String, Object>>() {});
+            Object properties = schema.get("properties");
+            if (!(properties instanceof Map<?, ?> map)) {
+                return Set.of();
+            }
+            Set<String> names = new HashSet<>(map.size());
+            for (Object k : map.keySet()) {
+                if (k != null) {
+                    names.add(k.toString());
+                }
+            }
+            return names;
+        } catch (Exception e) {
+            log.warn("解析工具 {} inputSchema 失败，跳过 toolParams 注入: {}",
+                    callback.getToolDefinition().name(), e.getMessage());
+            return Set.of();
         }
     }
 
