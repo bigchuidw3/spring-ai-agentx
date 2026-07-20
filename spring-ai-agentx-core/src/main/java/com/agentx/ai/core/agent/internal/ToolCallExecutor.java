@@ -9,6 +9,7 @@ import com.agentx.ai.core.timeline.TimelineCollector;
 import com.agentx.ai.core.tools.TodoWriteTool;
 import com.alibaba.fastjson2.JSON;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,8 +28,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * 工具调用执行器 — 负责工具执行、结果收集、消息组装。
@@ -280,39 +279,35 @@ public class ToolCallExecutor {
 
     // ==================== 参数替换 ====================
 
+    /**
+     * 把 RunnableParams.toolParams 强制合并进 LLM 生成的工具调用 args。
+     * <p>
+     * 三种情况都覆盖：
+     * <ul>
+     *   <li>LLM 写 {@code "userId":"default"} → 覆盖为真值</li>
+     *   <li>LLM 漏掉 {@code userId} → 增量补上（避免 LLM 偶发漏字段导致工具收到 null）</li>
+     *   <li>LLM 乱填 {@code "userId":"xxx"} → 同样覆盖（框架参数不该信 LLM）</li>
+     * </ul>
+     * 用 JSON merge 而非正则替换：能正确处理非 String 类型（Number/Boolean），
+     * 且不依赖 LLM 是否在 args 里写了字段名。
+     * <p>
+     * 多余的 key（不在方法签名里的）由 Spring AI 的 MethodToolCallback 忽略，不会报错。
+     */
     private String replaceToolParams(String argsJson, RunnableParams params) {
         if (params == null || params.getToolParams() == null || params.getToolParams().isEmpty()) {
             return argsJson;
         }
-        if (argsJson == null || argsJson.isEmpty()) {
+        if (argsJson == null || argsJson.isBlank()) {
             return argsJson;
         }
 
         try {
-            String result = argsJson;
-            for (Map.Entry<String, Object> entry : params.getToolParams().entrySet()) {
-                String key = entry.getKey();
-                Object value = entry.getValue();
-
-                String regex = "(\"" + Pattern.quote(key) + "\"\\s*:\\s*)\"?default\"?";
-
-                String replacement;
-                if (value instanceof String) {
-                    replacement = "$1\"" + Matcher.quoteReplacement((String) value) + "\"";
-                } else {
-                    replacement = "$1" + Matcher.quoteReplacement(String.valueOf(value));
-                }
-
-                String replaced = result.replaceAll(regex, replacement);
-                if (!replaced.equals(result)) {
-                    log.debug("替换工具参数: key={}, value={}", key, value);
-                    result = replaced;
-                }
-            }
-
-            return result;
+            Map<String, Object> args = objectMapper.readValue(argsJson,
+                    new TypeReference<Map<String, Object>>() {});
+            args.putAll(params.getToolParams());
+            return objectMapper.writeValueAsString(args);
         } catch (Exception e) {
-            log.error("替换工具参数失败，使用原始参数: {}", argsJson, e);
+            log.error("替换工具参数失败（argsJson 不是合法 JSON，原样返回）: {}", argsJson, e);
             return argsJson;
         }
     }
