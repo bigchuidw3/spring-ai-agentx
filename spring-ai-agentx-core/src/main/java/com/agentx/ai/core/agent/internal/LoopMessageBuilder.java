@@ -224,14 +224,9 @@ public class LoopMessageBuilder {
         }
 
         StringBuilder sb = new StringBuilder();
-        sb.append("\n\n## 系统参数（可用于工具调用）\n");
+        sb.append("\n\n## 系统参数（LLM 可见）\n");
         for (Map.Entry<String, Object> entry : params.getCustomParams().entrySet()) {
-            String key = entry.getKey();
-            if (params.getToolParams() != null && params.getToolParams().containsKey(key)) {
-                sb.append(key).append(": default\n");
-            } else {
-                sb.append(key).append(": ").append(entry.getValue()).append("\n");
-            }
+            sb.append(entry.getKey()).append(": ").append(entry.getValue()).append("\n");
         }
         return sb.toString();
     }

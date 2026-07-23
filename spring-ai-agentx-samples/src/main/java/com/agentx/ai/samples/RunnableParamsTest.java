@@ -17,7 +17,7 @@ import static com.agentx.ai.core.utils.ToolMergeUtil.mergeTools;
  * <ul>
  *   <li>测试 1：空参数 — RunnableParams.empty()</li>
  *   <li>测试 2：addParam — 参数注入系统提示词，LLM 可见真实值</li>
- *   <li>测试 3：addParam + addToolParam 配合 — LLM 只看到 default，运行时替换为真实值</li>
+ *   <li>测试 3：addToolParam — 参数不进提示词，工具执行前由框架注入真实值</li>
  * </ul>
  *
  * @author bigchui
@@ -68,16 +68,13 @@ public class RunnableParamsTest {
     }
 
     /**
-     * 测试 3：addParam + addToolParam 配合 — LLM 只看到 default，运行时替换。
+     * 测试 3：addToolParam — 参数不进提示词，工具执行前由框架注入。
      *
-     * <p>当 addParam 和 addToolParam 的 key 相同时：
-     * - 系统提示词中显示 "path: default"（隐藏真实路径，避免 LLM 幻觉）
-     * - 工具执行时自动将 "default" 替换为真实路径
-     *
-     * <p>适用于参数值过长或复杂，LLM 容易传错的场景。
+     * <p>适用于 userId、token、租户 ID 等运行时参数。
+     * LLM 不需要看到真实值，也不需要生成这些参数；工具执行前框架会按 inputSchema 自动补齐。
      */
     public static void testParamWithToolParam() {
-        TestConfig.printTestHeader("测试 3：addParam + addToolParam — 隐藏真实值");
+        TestConfig.printTestHeader("测试 3：addToolParam — 工具参数自动注入");
 
         ChatModel chatModel = TestConfig.createChatModel();
 
@@ -88,17 +85,16 @@ public class RunnableParamsTest {
                 .build();
 
         RunnableParams params = RunnableParams.builder()
-                // path 同时在 addParam 和 addToolParam 中声明 → 提示词显示 "path: default"
-                .addParam("xdrToken", "123556777221fdqewqewqewqttq77")
+                // xdrToken 只进入 toolParams，不进入 system prompt，工具执行前由框架注入
                 .addToolParam("xdrToken", "123556777221fdqewqewqewqttq77")
-                // language 只在 addParam 中声明 → 提示词显示 "language: zh-CN"（LLM 可见）
+                // language 进入 customParams，LLM 可见
                 .addParam("language", "zh-CN")
                 .build();
 
         // 系统提示词注入结果：
-        // ## 系统参数（可用于工具调用）
-        // path: default        ← 隐藏真实值，运行时替换
-        // language: zh-CN       ← LLM 直接可见
+        // ## 系统参数（LLM 可见）
+        // language: zh-CN
+        // xdrToken 不出现在提示词中，但 getPrjInfo(xdrToken) 执行前会被框架注入
 
         String answer = agent.call("根据token获取项目的详细信息？", params);
         System.out.println("A: " + answer);

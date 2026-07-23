@@ -17,9 +17,9 @@ public class TestTools {
     }
 
     @Tool(description = "根据token获取项目详细信息")
-    public String getPrjInfo(String xdrToken) {
+    public String getPrjInfo(@ToolParam(description = "项目访问 token，由框架通过 RunnableParams.toolParams 自动注入", required = false) String token) {
         log.info("EXECUTE Tool: 根据token获取项目详细信息");
 
-        return "这是一个测试项目，用于测试agentx的。当前的token= "+xdrToken;
+        return "这是一个测试项目，用于测试agentx的。当前的token= "+token;
     }
 }

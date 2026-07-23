@@ -285,9 +285,9 @@ public class ToolCallExecutor {
      * <p>
      * 三种情况都覆盖：
      * <ul>
-     *   <li>LLM 写 {@code "userId":"default"} → 覆盖为真值</li>
      *   <li>LLM 漏掉 {@code userId} → 增量补上（避免 LLM 偶发漏字段导致工具收到 null）</li>
-     *   <li>LLM 乱填 {@code "userId":"xxx"} → 同样覆盖（框架参数不该信 LLM）</li>
+     *   <li>LLM 乱填 {@code "userId":"xxx"} → 覆盖为真值（框架参数不该信 LLM）</li>
+     *   <li>LLM 传了旧版占位值 {@code "userId":"default"} → 同样覆盖为真值</li>
      * </ul>
      * 用 JSON merge 而非正则替换：能正确处理非 String 类型（Number/Boolean），
      * 且不依赖 LLM 是否在 args 里写了字段名。

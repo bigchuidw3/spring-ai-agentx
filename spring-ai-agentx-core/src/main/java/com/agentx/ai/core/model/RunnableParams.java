@@ -16,12 +16,11 @@ import java.util.Objects;
  * conversationId 用于 ChatMemory 会话管理和流式停止。
  * userId 用于长期记忆（MemoryStore）的用户维度标识，跨会话持久。
  *
- * customParams 和 toolParams 配合使用：
- * - addParam("city", "北京")：将参数注入系统提示词，格式为 "city: 北京"，LLM 可直接使用。
- * - addToolParam("city", "北京")：标记该参数需要运行时替换。
- * - 当两者 key 相同时：系统提示词中显示 "city: default"（隐藏真实值），
- *   工具执行时自动将 "default" 替换为 "北京"。
- *   适用于参数值过长或容易导致 LLM 幻觉的场景。
+ * customParams 和 toolParams 分别面向不同对象：
+ * - addParam("language", "zh-CN")：将参数注入系统提示词，LLM 可见并可直接使用。
+ * - addToolParam("userId", "123")：不注入系统提示词，只在工具执行前按 inputSchema 注入真实参数。
+ *
+ * toolParams 适合传递 userId、token、租户 ID 等不应依赖 LLM 生成的运行时参数。
  *
  * @author bigchui
  * 
