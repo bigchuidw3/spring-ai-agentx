@@ -124,10 +124,32 @@ public final class MessageJsonSerializer {
             if (toolCalls != null && !toolCalls.isEmpty()) {
                 map.put("tool_calls", toToolCallMaps(toolCalls));
             }
+            String reasoning = extractReasoningContent(assistantMessage);
+            if (reasoning != null && !reasoning.isEmpty()) {
+                map.put("reasoning_content", reasoning);
+            }
         } else {
             map.put("content", message.getText());
         }
         return map;
+    }
+
+    /**
+     * 从 AssistantMessage metadata 提取思考内容（兼容 reasoningContent / reasoning_content 两个键）。
+     */
+    private static String extractReasoningContent(AssistantMessage message) {
+        Map<String, Object> metadata = message.getMetadata();
+        if (metadata == null || metadata.isEmpty()) {
+            return null;
+        }
+        Object rc = metadata.get("reasoningContent");
+        if (rc == null) {
+            rc = metadata.get("reasoning_content");
+        }
+        if (rc instanceof String s && !s.isEmpty()) {
+            return s;
+        }
+        return null;
     }
 
     private static List<Map<String, Object>> toToolCallMaps(List<AssistantMessage.ToolCall> toolCalls) {
@@ -222,19 +244,35 @@ public final class MessageJsonSerializer {
 
         if ("assistant".equalsIgnoreCase(role)) {
             List<AssistantMessage.ToolCall> toolCalls = parseToolCalls(item.get("tool_calls"));
+            Map<String, Object> props = buildReasoningProperties(asString(item.get("reasoning_content")));
             if (toolCalls != null && !toolCalls.isEmpty()) {
                 return AssistantMessage.builder()
                         .content(content != null ? content : "")
                         .toolCalls(toolCalls)
+                        .properties(props)
                         .build();
             }
-            return new AssistantMessage(content != null ? content : "");
+            return AssistantMessage.builder()
+                    .content(content != null ? content : "")
+                    .properties(props)
+                    .build();
         }
         if ("system".equalsIgnoreCase(role)) {
             return new SystemMessage(content != null ? content : "");
         }
         // 默认按 user 处理（含 role="user" 及无法识别的 role）
         return new UserMessage(content != null ? content : "");
+    }
+
+    /**
+     * 将 reasoning_content 字符串包装为 Spring AI AssistantMessage 的 properties。
+     * 空值返回空 Map，避免污染序列化输出。
+     */
+    private static Map<String, Object> buildReasoningProperties(String reasoning) {
+        if (reasoning == null || reasoning.isEmpty()) {
+            return Map.of();
+        }
+        return Map.of("reasoningContent", reasoning);
     }
 
     @SuppressWarnings("unchecked")

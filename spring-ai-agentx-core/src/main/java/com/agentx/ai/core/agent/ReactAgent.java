@@ -2,6 +2,17 @@ package com.agentx.ai.core.agent;
 
 import com.agentx.ai.core.context.ContextCompactor;
 import com.agentx.ai.core.context.ContextPolicy;
+import com.agentx.ai.core.context.compress.CompressionStrategy;
+import com.agentx.ai.core.context.compress.LlmSummarizer;
+import com.agentx.ai.core.context.compress.NoOpOffloadStore;
+import com.agentx.ai.core.context.compress.OffloadStore;
+import com.agentx.ai.core.context.compress.SessionBackedOffloadStore;
+import com.agentx.ai.core.context.compress.l1.HistoricalToolListStrategy;
+import com.agentx.ai.core.context.compress.l2.LargeMsgOffloadWithKeepStrategy;
+import com.agentx.ai.core.context.compress.l3.LargeMsgOffloadNoKeepStrategy;
+import com.agentx.ai.core.context.compress.l4.HistoricalRoundSummaryStrategy;
+import com.agentx.ai.core.context.compress.l5.CurrentRoundLargeMsgStrategy;
+import com.agentx.ai.core.context.compress.l6.CurrentRoundOverallStrategy;
 import com.agentx.ai.core.advisors.PauseAdvisor;
 import com.agentx.ai.core.advisors.RequestLoggingAdvisor;
 import com.agentx.ai.core.agent.internal.AgentLoopExecutor;
@@ -20,7 +31,10 @@ import com.agentx.ai.core.memory.semantic.SemanticMemoryManager;
 import com.agentx.ai.core.memory.store.DataSourceStorageFactory;
 import com.agentx.ai.core.memory.store.MemoryStore;
 import com.agentx.ai.core.memory.store.SemanticMemoryStore;
+import com.agentx.ai.core.memory.store.SessionMessageStore;
+import com.agentx.ai.core.memory.store.ConversationStore;
 import com.agentx.ai.core.tools.AskUserTool;
+import com.agentx.ai.core.tools.ContextReloadTool;
 import com.agentx.ai.core.trace.TraceStore;
 import com.agentx.ai.core.tools.SubAgentTool;
 import com.agentx.ai.core.utils.ToolMergeUtil;
@@ -30,7 +44,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.api.Advisor;
-import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.tool.ToolCallback;
@@ -68,7 +81,8 @@ public class ReactAgent {
     private final List<Advisor> advisors;
     private final AgentTaskManager taskManager;
     private final String instructions;
-    private final ChatMemory chatMemory;
+    private final SessionMessageStore sessionMessageStore;
+    private final ConversationStore conversationStore;
     private final MemoryStore memoryStore;
     private final SemanticMemoryManager semanticMemoryManager;
     private final DataSource dataSource;
@@ -92,7 +106,8 @@ public class ReactAgent {
     private final int maxHistoryTokens;
     private final int sessionSummarizeStep;
 
-    private ReactAgent(Builder builder, ChatMemory chatMemory, MemoryStore memoryStore,
+    private ReactAgent(Builder builder, SessionMessageStore sessionMessageStore,
+                       ConversationStore conversationStore, MemoryStore memoryStore,
                        SemanticMemoryManager semanticMemoryManager, TraceStore traceStore,
                        PauseStateStore stateStore) {
         this.deferredToolRegistry = builder.deferredToolRegistry;
@@ -128,7 +143,8 @@ public class ReactAgent {
         this.advisors = List.copyOf(builder.advisors);
         this.taskManager = builder.taskManager;
         this.instructions = builder.instructions;
-        this.chatMemory = chatMemory;
+        this.sessionMessageStore = sessionMessageStore;
+        this.conversationStore = conversationStore;
         this.memoryStore = memoryStore;
         this.semanticMemoryManager = semanticMemoryManager;
         this.dataSource = builder.dataSource;
@@ -166,7 +182,8 @@ public class ReactAgent {
                 .maxRounds(maxRounds)
                 .tools(tools)
                 .taskManager(taskManager)
-                .chatMemory(chatMemory)
+                .sessionMessageStore(sessionMessageStore)
+                .conversationStore(conversationStore)
                 .instructions(instructions)
                 .memoryStore(memoryStore)
                 .chatModel(chatModel)
@@ -184,7 +201,33 @@ public class ReactAgent {
 
         // 上下文压缩（可选）
         if (this.contextPolicy != null) {
-            executorBuilder.contextCompactor(new ContextCompactor(this.contextPolicy, this.chatModel));
+            OffloadStore offloadStore = (enableSession && sessionMessageStore != null)
+                    ? new SessionBackedOffloadStore(sessionMessageStore)
+                    : new NoOpOffloadStore();
+            LlmSummarizer summarizer = new LlmSummarizer(this.chatModel);
+            List<CompressionStrategy> chain = new ArrayList<>();
+            chain.add(new HistoricalToolListStrategy());
+            chain.add(new LargeMsgOffloadWithKeepStrategy());
+            chain.add(new LargeMsgOffloadNoKeepStrategy());
+            chain.add(new HistoricalRoundSummaryStrategy(summarizer));
+            chain.add(new CurrentRoundLargeMsgStrategy(summarizer));
+            chain.add(new CurrentRoundOverallStrategy(summarizer));
+            ContextCompactor compactor = new ContextCompactor(
+                    this.contextPolicy, this.chatModel,
+                    offloadStore, sessionMessageStore,
+                    chain);
+            executorBuilder.contextCompactor(compactor);
+
+            // context_reload 工具（仅在启用 session 时注册，追加到用户已配置的 tools 之后）
+            if (enableSession && sessionMessageStore != null) {
+                ToolCallback[] reloadCallbacks = org.springframework.ai.support.ToolCallbacks.from(
+                        new ContextReloadTool(sessionMessageStore));
+                List<ToolCallback> merged = new ArrayList<>(tools);
+                for (ToolCallback tc : reloadCallbacks) {
+                    merged.add(tc);
+                }
+                executorBuilder.tools(merged);
+            }
         }
 
         // 语义记忆（可选第三层）
@@ -806,10 +849,10 @@ public class ReactAgent {
          * // 默认配置
          * .contextPolicy(ContextPolicy.defaults())
          *
-         * // 自定义配置 + 保护 Skill 指令
+         * // 自定义配置
          * .contextPolicy(ContextPolicy.builder()
          *     .tokenThreshold(30000)
-         *     .protectedTools("SkillsTool")
+         *     .lastKeep(80)
          *     .build())
          * }</pre>
          *
@@ -974,15 +1017,17 @@ public class ReactAgent {
         public ReactAgent build() {
             Objects.requireNonNull(chatModel, "chatModel must not be null");
 
-            ChatMemory chatMemory = null;
+            SessionMessageStore sessionMessageStore = null;
+            ConversationStore conversationStore = null;
             MemoryStore memoryStore = null;
             SemanticMemoryManager semanticMemoryManager = null;
 
-            // 传入 DataSource 时，框架创建所有存储对象（session/memory/trace）
+            // 传入 DataSource 时，框架创建所有存储对象（session/memory/trace/conversation）
             // 是否实际写入由各 enableXXX 在运行时控制
             TraceStore traceStore = null;
             if (dataSource != null) {
-                chatMemory = DataSourceStorageFactory.createChatMemory(dataSource);
+                sessionMessageStore = DataSourceStorageFactory.createSessionMessageStore(dataSource);
+                conversationStore = DataSourceStorageFactory.createConversationStore(dataSource);
                 memoryStore = DataSourceStorageFactory.createMemoryStore(dataSource);
                 traceStore = DataSourceStorageFactory.createTraceStore(dataSource);
             }
@@ -1036,7 +1081,8 @@ public class ReactAgent {
                 tools.add(new SubAgentTool.SubAgentToolCallback(agentName, agentDesc, wrappedProvider));
             }
 
-            return new ReactAgent(this, chatMemory, memoryStore, semanticMemoryManager, traceStore,
+            return new ReactAgent(this, sessionMessageStore, conversationStore, memoryStore,
+                    semanticMemoryManager, traceStore,
                     stateStore != null ? stateStore : new InMemoryPauseStateStore());
         }
     }

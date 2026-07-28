@@ -3,7 +3,6 @@ package com.agentx.ai.core.agent.internal;
 import com.agentx.ai.core.exception.AgentErrorCode;
 import com.agentx.ai.core.exception.AgentException;
 import com.agentx.ai.core.model.AgentStreamEvent;
-import com.agentx.ai.core.timeline.TimelineCollector;
 import com.agentx.ai.core.tools.toolsearch.DeferredToolRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -98,17 +97,19 @@ public class LlmInvoker {
      * 处理流式路径的重试/失败逻辑。
      * 统一 scheduleRound 和 forceFinalStream 中的 onErrorResume 重复代码。
      *
-     * @param err          异常
-     * @param retryAttempt 当前重试次数
-     * @param sink         事件接收器
-     * @param retryAction  重试时执行的操作
-     * @param logLabel     日志标识（如 "LLM stream error"）
+     * @param err                 异常
+     * @param retryAttempt        当前重试次数
+     * @param sink                事件接收器
+     * @param retryAction         重试时执行的操作
+     * @param logLabel            日志标识（如 "LLM stream error"）
+     * @param onTerminalFailure   最终失败时（重试耗尽）的回调，在 sink.tryEmitComplete() 之前执行，
+     *                            供调用方做终态落库（避免 doFinally 时序竞态）
      * @return Flux.empty() 供 onErrorResume 使用
      */
     public Flux<ChatResponse> handleStreamError(Throwable err, int retryAttempt,
                                                 Sinks.Many<AgentStreamEvent> sink,
-                                                TimelineCollector collector,
-                                                Runnable retryAction, String logLabel) {
+                                                Runnable retryAction, String logLabel,
+                                                Runnable onTerminalFailure) {
         if (retryAttempt < maxRetries) {
             String apiDetail = extractHttpResponseBody(err);
             log.warn("{} (attempt {}/{}), retrying in {}ms: {}{}",
@@ -117,17 +118,23 @@ public class LlmInvoker {
             String retryMsg = "LLM 调用失败，正在重试 (" + (retryAttempt + 1) + "/" + maxRetries + ")";
             sink.tryEmitNext(new AgentStreamEvent.Error(
                     AgentErrorCode.LLM_CALL_FAILED, retryMsg, err.getMessage()));
-            collector.onError(retryMsg, err.getMessage());
             Schedulers.boundedElastic().schedule(retryAction, RETRY_INTERVAL_MS, TimeUnit.MILLISECONDS);
         } else {
             String apiDetail = extractHttpResponseBody(err);
             log.error("{} failed after {} retries: {}{}",
                     logLabel, maxRetries, err.getMessage(),
                     apiDetail != null ? "\nAPI Response: " + apiDetail : "", err);
+            // 在发射 Error/Complete 之前先做终态落库，避免 doFinally 时序竞态
+            if (onTerminalFailure != null) {
+                try {
+                    onTerminalFailure.run();
+                } catch (Exception e) {
+                    log.warn("onTerminalFailure callback failed: {}", e.getMessage());
+                }
+            }
             String failMsg = "LLM 调用失败（已重试 " + maxRetries + " 次）";
             sink.tryEmitNext(new AgentStreamEvent.Error(
                     AgentErrorCode.LLM_CALL_FAILED, failMsg, err.getMessage()));
-            collector.onError(failMsg, err.getMessage());
             sink.tryEmitNext(new AgentStreamEvent.Complete());
             sink.tryEmitComplete();
         }

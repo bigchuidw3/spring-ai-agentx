@@ -6,7 +6,7 @@ import com.agentx.ai.core.model.AgentStreamEvent;
 import com.agentx.ai.core.model.PauseState;
 import com.agentx.ai.core.model.PendingToolCall;
 import com.agentx.ai.core.model.RunnableParams;
-import com.agentx.ai.core.stage.AgentExecutionContext;
+import com.agentx.ai.core.stage.AgentRuntimeContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -32,7 +32,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * </pre>
  * <p>状态机单向不可回归：流一旦启动不再回到 INIT。
  *
- * <p>中断可在任何安全点触发，{@link #buildSnapshot(String, AgentExecutionContext, long)}
+ * <p>中断可在任何安全点触发，{@link #buildSnapshot(String, AgentRuntimeContext, long)}
  * 按当前安全点填充 PauseState 字段：
  * <ul>
  *   <li>INIT：流未启动，messages 合法但无 pending（极少触发）</li>
@@ -118,12 +118,12 @@ public class InterruptContext {
      * 构建暂停快照。messages 取当前 messages 列表快照（浅拷贝避免后续修改污染）。
      *
      * @param interruptMessage 中断说明消息
-     * @param execCtx          执行上下文（提供 sessionId、token 累计）
+     * @param runtimeCtx       运行时上下文（提供 sessionId、token 累计）
      * @param currentRound     当前轮次（来自 AgentLoopExecutor 的 roundCounter）
      * @return PauseState 实例（已填充 reason、interruptPhase、pendingToolCalls 等）
      */
     public PauseState buildSnapshot(String interruptMessage,
-                                    AgentExecutionContext execCtx,
+                                    AgentRuntimeContext runtimeCtx,
                                     long currentRound) {
         List<Message> messagesSnapshot = new ArrayList<>(messagesRef);
 
@@ -132,9 +132,9 @@ public class InterruptContext {
             pending.add(new PendingToolCall(tc.id(), tc.name(), tc.arguments()));
         }
 
-        long sessionId = execCtx != null ? execCtx.getSessionId() : 0L;
-        long promptTokens = execCtx != null ? execCtx.getTotalPromptTokens() : 0L;
-        long completionTokens = execCtx != null ? execCtx.getTotalCompletionTokens() : 0L;
+        long sessionId = runtimeCtx != null ? runtimeCtx.getSessionId() : 0L;
+        long promptTokens = runtimeCtx != null ? runtimeCtx.getTotalPromptTokens() : 0L;
+        long completionTokens = runtimeCtx != null ? runtimeCtx.getTotalCompletionTokens() : 0L;
 
         return PauseState.builder()
                 .messages(messagesSnapshot)

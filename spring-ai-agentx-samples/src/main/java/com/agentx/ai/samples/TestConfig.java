@@ -30,19 +30,11 @@ import org.springframework.retry.support.RetryTemplate;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
-import reactor.netty.http.HttpProtocol;
 import reactor.netty.http.client.HttpClient;
 
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLException;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.X509TrustManager;
 import javax.sql.DataSource;
 import java.io.IOException;
 import java.io.InputStream;
-import java.security.KeyManagementException;
-import java.security.NoSuchAlgorithmException;
-import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
@@ -65,9 +57,9 @@ public final class TestConfig {
     private static int si(String key, int defaultValue) { return Integer.parseInt(s(key, String.valueOf(defaultValue))); }
 
     // ===== 公开常量（用于测试打印）=====
-    static final String CHAT_MODEL = s("dashscope.chat.model", "qwen-plus");
-    static final String EMBEDDING_MODEL = s("embedding.model", "text-embedding-v3");
-    static final String SKILLS_DIR = s("skills.dir", "");
+    public static final String CHAT_MODEL = s("dashscope.chat.model", "qwen-plus");
+    public static final String EMBEDDING_MODEL = s("embedding.model", "text-embedding-v3");
+    public static final String SKILLS_DIR = s("skills.dir", "");
 
     /** HTTP 响应超时（5 分钟），思考模型非流式调用需要较长等待 */
     private static final Duration HTTP_TIMEOUT = Duration.ofSeconds(300);

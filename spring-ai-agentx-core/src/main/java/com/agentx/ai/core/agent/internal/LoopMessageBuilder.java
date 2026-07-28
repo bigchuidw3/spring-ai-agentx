@@ -1,6 +1,6 @@
 package com.agentx.ai.core.agent.internal;
 
-import com.agentx.ai.core.memory.store.AgentChatMemory;
+import com.agentx.ai.core.memory.store.SessionMessageStore;
 import com.agentx.ai.core.memory.util.MemoryInjector;
 import com.agentx.ai.core.model.RunnableParams;
 import com.agentx.ai.core.model.ThinkingMode;
@@ -8,7 +8,6 @@ import com.agentx.ai.core.prompt.PromptConstants;
 import com.agentx.ai.core.tools.toolsearch.DeferredToolRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.SystemMessage;
@@ -20,14 +19,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 消息构建器 — 负责初始消息列表构建和会话历史持久化。
- *
- * <ul>
- *   <li>构建系统提示词（instructions + 记忆 + 自定义参数 + 工具发现引导）</li>
- *   <li>加载会话历史</li>
- *   <li>结构化输出格式注入</li>
- *   <li>会话历史保存到 ChatMemory</li>
- * </ul>
+ * 消息构建器 — 构建初始消息列表并记录新消息边界。
+ * 历史从 SessionMessageStore 加载完整消息链（含 ToolCall/ToolResponse）。
  *
  * @author bigchui
  */
@@ -36,64 +29,55 @@ public class LoopMessageBuilder {
     private static final Logger log = LoggerFactory.getLogger(LoopMessageBuilder.class);
 
     private final String instructions;
-    private final ChatMemory chatMemory;
+    private final SessionMessageStore sessionMessageStore;
     private final MemoryInjector memoryInjector;
     private final ThinkingMode thinkingMode;
     private final DeferredToolRegistry deferredToolRegistry;
     private final boolean todoWriteEnabled;
     private final boolean enableSession;
-    private final int maxHistoryRounds;
-    private final int maxHistoryTokens;
 
-    public LoopMessageBuilder(String instructions, ChatMemory chatMemory,
+    public LoopMessageBuilder(String instructions, SessionMessageStore sessionMessageStore,
                               MemoryInjector memoryInjector, ThinkingMode thinkingMode,
                               DeferredToolRegistry deferredToolRegistry,
-                              boolean todoWriteEnabled, boolean enableSession,
-                              int maxHistoryRounds, int maxHistoryTokens) {
+                              boolean todoWriteEnabled, boolean enableSession) {
         this.instructions = instructions;
-        this.chatMemory = chatMemory;
+        this.sessionMessageStore = sessionMessageStore;
         this.memoryInjector = memoryInjector;
         this.thinkingMode = thinkingMode;
         this.deferredToolRegistry = deferredToolRegistry;
         this.todoWriteEnabled = todoWriteEnabled;
         this.enableSession = enableSession;
-        this.maxHistoryRounds = maxHistoryRounds;
-        this.maxHistoryTokens = maxHistoryTokens;
     }
 
     /**
-     * 构建初始消息列表。
+     * 构建初始消息列表，返回消息列表与新消息起点索引。
+     * newMsgStartIndex 标记本次调用新增消息的边界，终态批量落库时据此切片。
      */
-    public List<Message> buildInitialMessages(String query, RunnableParams params) {
+    public BuiltMessages buildInitialMessages(String query, RunnableParams params) {
         List<Message> messages = new ArrayList<>();
 
-        // 构建系统提示词
+        // 1. 系统提示词
         String systemPrompt = "";
         if (instructions != null && !instructions.isBlank()) {
             systemPrompt = instructions;
         }
-
         systemPrompt = appendSection(systemPrompt, memoryInjector.buildMemorySection(params));
 
-        // 注入自定义参数
         String customParamSection = buildCustomParamSection(params);
         if (!customParamSection.isEmpty()) {
             systemPrompt = systemPrompt + customParamSection;
         }
-
         if (deferredToolRegistry != null) {
             systemPrompt = appendSection(systemPrompt, PromptConstants.TOOL_SEARCH_GUIDANCE);
         }
-
         if (todoWriteEnabled) {
             systemPrompt = appendSection(systemPrompt, PromptConstants.TODO_WRITE_GUIDANCE);
         }
-
         if (!systemPrompt.isEmpty()) {
             messages.add(new SystemMessage(systemPrompt));
         }
 
-        // 记忆区块：合并为一条 UserMessage，作为背景参考放在短期历史上方
+        // 2. 记忆上下文：合并为一条 AssistantMessage，作为背景参考放在短期历史上方
         String crossSection = memoryInjector.buildCrossSummarySection(params, query);
         String sessionSection = memoryInjector.buildSessionSummarySection(params);
         if (!sessionSection.isEmpty() || !crossSection.isEmpty()) {
@@ -105,16 +89,15 @@ public class LoopMessageBuilder {
             if (!crossSection.isEmpty()) {
                 memoryContext.append(crossSection);
             }
-            messages.add(new UserMessage(memoryContext.toString().trim()));
+            messages.add(new AssistantMessage(memoryContext.toString().trim()));
         }
 
+        // 3. 历史消息链（优先 working_messages 压缩视图，回退 original_messages）
         String conversationId = params != null ? params.getConversationId() : null;
-        if (enableSession && chatMemory != null && conversationId != null) {
-            List<Message> history;
-            if (chatMemory instanceof AgentChatMemory acm) {
-                history = acm.get(conversationId, maxHistoryRounds, maxHistoryTokens);
-            } else {
-                history = chatMemory.get(conversationId);
+        if (enableSession && sessionMessageStore != null && conversationId != null) {
+            List<Message> history = sessionMessageStore.getMessages(conversationId, "working_messages");
+            if (history.isEmpty()) {
+                history = sessionMessageStore.getMessages(conversationId, "original_messages");
             }
             for (Message msg : history) {
                 if (!(msg instanceof SystemMessage)) {
@@ -123,7 +106,10 @@ public class LoopMessageBuilder {
             }
         }
 
-        // 结构化输出格式指令追加到 UserMessage
+        // 4. 边界标记：此前的消息为历史/背景，此后为本轮新增
+        int newMsgStartIndex = messages.size();
+
+        // 5. 当前用户问题
         String userContent = query;
         if (params != null && params.getOutputType() != null) {
             BeanOutputConverter<?> converter = new BeanOutputConverter<>(
@@ -131,98 +117,18 @@ public class LoopMessageBuilder {
             );
             userContent = userContent + "\n" + converter.getFormat();
         }
-
-        // thinkingMode=DISABLED 时追加 <no_think> 标签
         if (thinkingMode == ThinkingMode.DISABLED) {
             userContent = userContent + "\n<no_think>";
         }
-
         messages.add(new UserMessage(userContent));
 
-        return messages;
-    }
-
-    /**
-     * 保存会话启动记录到 ChatMemory（仅 question，answer 为空）。
-     * <p>
-     * 在 Agent 执行开始时调用，确保中断/异常场景下前端仍有历史记录可展示。
-     * 后续完成时通过 UPSERT 更新 answer / think / timeline。
-     *
-     * @param query          用户问题
-     * @param conversationId 会话 ID
-     * @param userId         用户标识（可为 null）
-     * @param sessionId      预生成的 agentx_session 主键 ID
-     */
-    public void saveSessionStart(String query, String conversationId, String userId, long sessionId) {
-        if (!enableSession || chatMemory == null || conversationId == null
-                || query == null || query.isEmpty() || sessionId == 0L) {
-            return;
-        }
-        try {
-            if (chatMemory instanceof AgentChatMemory acm) {
-                acm.upsert(sessionId, conversationId, userId, query, null, null, null);
-            }
-            log.debug("Saved session start: conversationId={}, sessionId={}", conversationId, sessionId);
-        } catch (Exception e) {
-            log.error("Failed to save session start: {}", e.getMessage());
-        }
-    }
-
-    /**
-     * 保存会话历史到 ChatMemory。
-     *
-     * @param query          用户问题
-     * @param answer         助手回答（正文）
-     * @param think          思考过程（可为 null）
-     * @param timelineJson   时间线 JSON（可为 null）
-     * @param conversationId 会话 ID
-     * @param userId         用户标识（可为 null）
-     */
-    public void saveToChatMemory(String query, String answer, String think, String timelineJson,
-                                 String conversationId, String userId) {
-        saveToChatMemory(query, answer, think, timelineJson, conversationId, userId, 0L);
-    }
-
-    /**
-     * 保存会话历史到 ChatMemory，并显式传入 sessionId。
-     * <p>
-     * sessionId 用于让 agentx_session 主键与外部上下文（trace、文件关联等）对齐。
-     * 非 {@link AgentChatMemory} 实现的 ChatMemory 会忽略 sessionId。
-     *
-     * @param query          用户问题
-     * @param answer         助手回答（正文）
-     * @param think          思考过程（可为 null）
-     * @param timelineJson   时间线 JSON（可为 null）
-     * @param conversationId 会话 ID
-     * @param userId         用户标识（可为 null）
-     * @param sessionId      预生成的 agentx_session 主键 ID；为 0 时由底层自动生成
-     */
-    public void saveToChatMemory(String query, String answer, String think, String timelineJson,
-                                 String conversationId, String userId, long sessionId) {
-        if (!enableSession || chatMemory == null || conversationId == null || query == null || query.isEmpty()) {
-            return;
-        }
-        try {
-            if (chatMemory instanceof AgentChatMemory acm) {
-                acm.upsert(sessionId, conversationId, userId, query, answer, think, timelineJson);
-            } else {
-                chatMemory.add(conversationId, List.of(
-                        new UserMessage(query),
-                        new AssistantMessage(answer)
-                ));
-            }
-            log.debug("Saved conversation to agentx_session: conversationId={}, userId={}, sessionId={}",
-                    conversationId, userId, sessionId);
-        } catch (Exception e) {
-            log.error("Failed to save conversation to agentx_session: {}", e.getMessage());
-        }
+        return new BuiltMessages(messages, newMsgStartIndex);
     }
 
     private String buildCustomParamSection(RunnableParams params) {
         if (params == null || params.getCustomParams() == null || params.getCustomParams().isEmpty()) {
             return "";
         }
-
         StringBuilder sb = new StringBuilder();
         sb.append("\n\n## 系统参数（LLM 可见）\n");
         for (Map.Entry<String, Object> entry : params.getCustomParams().entrySet()) {

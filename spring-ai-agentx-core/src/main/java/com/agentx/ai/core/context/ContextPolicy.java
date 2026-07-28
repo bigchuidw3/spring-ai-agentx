@@ -1,163 +1,118 @@
 package com.agentx.ai.core.context;
 
-import java.util.HashSet;
-import java.util.Set;
-
 /**
- * 上下文压缩策略配置。
- * <p>
- * 控制 Agent 循环中上下文压缩的行为，包括 token 阈值、保留数量、保护工具列表等。
- * 通过 {@code ReactAgent.builder().contextPolicy(ContextPolicy)} 注入。
- * <p>
- * 不配置时上下文压缩不启用，Agent 行为完全不变。
+ * 上下文压缩策略配置（v1.0.2 重构）。
+ * 控制 6 层渐进式压缩的全部阈值与保护区大小。
  *
- * <p>使用示例：
+ * <h3>单位约定</h3>
+ * <ul>
+ *   <li><b>token</b>：所有触发/比较类阈值（{@link #tokenThreshold}、{@link #minCompressionTokens}、{@link #largePayloadTokens}），
+ *       用 {@link TokenEstimator} 估算（区分中英文，CJK/1.5、ASCII/4.0），与 LLM 上下文窗口对齐</li>
+ *   <li><b>字符数</b>：所有 {@code *Chars} 后缀字段，用于截断/预览长度（直观、无需换算）</li>
+ *   <li><b>消息条数</b>：{@link #lastKeep}、{@link #minConsecutiveToolMessages}</li>
+ * </ul>
+ *
  * <pre>{@code
- * // 默认配置
  * ContextPolicy.defaults()
  *
- * // 自定义配置
  * ContextPolicy.builder()
- *     .tokenThreshold(30000)
- *     .keepRecentTools(5)
- *     .protectedTools("my_protected_tool")  // SkillsTool、TodoWrite 已内置保护，无需手动添加
+ *     .lastKeep(80)
+ *     .tokenThreshold(60000)
+ *     .largePayloadTokens(4096)
  *     .build()
  * }</pre>
  *
- * @param tokenThreshold  触发 auto_compact 的 token 估算阈值，默认 60000
- * @param keepRecentTools micro_compact 保留最近 N 轮工具调用的完整内容，默认 4
- * @param maxToolLength   ToolResponse 内容和 ToolCall 参数的统一压缩阈值（字符），
- *                        超过时替换为占位符，默认 200。设为 0 不截断
- * @param protectedTools  受保护的工具名称集合（不包含内置保护工具）。
- *                        内置保护工具（SkillsTool、TodoWrite）会自动加入，无需手动配置。
- *                        这些工具的响应和参数不会被压缩。
+ * @param lastKeep                  保护区大小。最近 N 条消息不被 L1-L4 压缩。默认 50
+ * @param msgThreshold              外层门禁的消息数阈值。达到后才进入策略链。默认 100
+ * @param tokenThreshold            外层门禁的 token 阈值。默认 90000（≈ 128K × 0.7）
+ * @param minConsecutiveToolMessages L1 触发的连续工具消息条数。默认 6（= 3 轮工具调用）
+ * @param minCompressionTokens      L1/L4/L6 等策略的最小总 token 数。默认 5000
+ * @param largePayloadTokens        L2/L3/L5 单条大消息 token 阈值。默认 2000
+ * @param offloadPreviewChars       offload 后保留的预览长度（字符）。默认 200
+ * @param toolArgPreviewChars       L1 模板里工具参数预览长度（字符）。默认 100
+ * @param toolResultPreviewChars    L1 模板里工具结果预览长度（字符）。默认 100
+ * @param maxLlmCompressionCount    L4/L5 单次 compact 最多处理的压缩单元数。默认 3
+ * @param currentRoundRatio         L6 目标压缩比（0-1）。默认 0.3
  * @author bigchui
- * 
  */
 public record ContextPolicy(
+        int lastKeep,
+        int msgThreshold,
         int tokenThreshold,
-        int keepRecentTools,
-        int maxToolLength,
-        Set<String> protectedTools
+        int minConsecutiveToolMessages,
+        int minCompressionTokens,
+        int largePayloadTokens,
+        int offloadPreviewChars,
+        int toolArgPreviewChars,
+        int toolResultPreviewChars,
+        int maxLlmCompressionCount,
+        double currentRoundRatio
 ) {
 
-    /** 默认 token 阈值 */
-    public static final int DEFAULT_TOKEN_THRESHOLD = 60000;
-    /** 默认保留最近工具调用轮数 */
-    public static final int DEFAULT_KEEP_RECENT_TOOLS = 4;
-    /** 默认工具内容压缩阈值（ToolResponse 和 ToolCall args 统一使用） */
-    public static final int DEFAULT_MAX_TOOL_LENGTH = 200;
-    /** 内置保护工具：SkillsTool、TodoWrite */
-    private static final Set<String> BUILTIN_PROTECTED_TOOLS = Set.of("Skill", "TodoWrite");
+    public static final int DEFAULT_LAST_KEEP = 50;
+    public static final int DEFAULT_MSG_THRESHOLD = 100;
+    public static final int DEFAULT_TOKEN_THRESHOLD = 90000;
+    public static final int DEFAULT_MIN_CONSECUTIVE_TOOL_MSGS = 6;
+    public static final int DEFAULT_MIN_COMPRESSION_TOKENS = 5000;
+    public static final int DEFAULT_LARGE_PAYLOAD_TOKENS = 2000;
+    public static final int DEFAULT_OFFLOAD_PREVIEW_CHARS = 200;
+    public static final int DEFAULT_TOOL_ARG_PREVIEW_CHARS = 100;
+    public static final int DEFAULT_TOOL_RESULT_PREVIEW_CHARS = 100;
+    public static final int DEFAULT_MAX_LLM_COMPRESSION_COUNT = 3;
+    public static final double DEFAULT_CURRENT_ROUND_RATIO = 0.3;
 
-    public ContextPolicy {
-        // 合并用户配置的保护工具 + 内置保护工具
-        Set<String> allProtected = new HashSet<>(BUILTIN_PROTECTED_TOOLS);
-        if (protectedTools != null) {
-            allProtected.addAll(protectedTools);
-        }
-        protectedTools = Set.copyOf(allProtected);
-    }
-
-    /**
-     * 返回默认配置。
-     *
-     * @return 默认上下文压缩策略
-     */
     public static ContextPolicy defaults() {
         return new ContextPolicy(
+                DEFAULT_LAST_KEEP,
+                DEFAULT_MSG_THRESHOLD,
                 DEFAULT_TOKEN_THRESHOLD,
-                DEFAULT_KEEP_RECENT_TOOLS,
-                DEFAULT_MAX_TOOL_LENGTH,
-                Set.of()
+                DEFAULT_MIN_CONSECUTIVE_TOOL_MSGS,
+                DEFAULT_MIN_COMPRESSION_TOKENS,
+                DEFAULT_LARGE_PAYLOAD_TOKENS,
+                DEFAULT_OFFLOAD_PREVIEW_CHARS,
+                DEFAULT_TOOL_ARG_PREVIEW_CHARS,
+                DEFAULT_TOOL_RESULT_PREVIEW_CHARS,
+                DEFAULT_MAX_LLM_COMPRESSION_COUNT,
+                DEFAULT_CURRENT_ROUND_RATIO
         );
     }
 
-    /**
-     * 创建 Builder。
-     *
-     * @return Builder 实例
-     */
     public static Builder builder() {
         return new Builder();
     }
 
-    /**
-     * 检查工具是否受保护（不被压缩）。
-     *
-     * @param toolName 工具名称
-     * @return 是否受保护
-     */
-    public boolean isProtected(String toolName) {
-        return protectedTools.contains(toolName);
-    }
-
-    /**
-     * Builder 模式构建 ContextPolicy。
-     */
     public static class Builder {
+        private int lastKeep = DEFAULT_LAST_KEEP;
+        private int msgThreshold = DEFAULT_MSG_THRESHOLD;
         private int tokenThreshold = DEFAULT_TOKEN_THRESHOLD;
-        private int keepRecentTools = DEFAULT_KEEP_RECENT_TOOLS;
-        private int maxToolLength = DEFAULT_MAX_TOOL_LENGTH;
-        private Set<String> protectedTools = Set.of();
+        private int minConsecutiveToolMessages = DEFAULT_MIN_CONSECUTIVE_TOOL_MSGS;
+        private int minCompressionTokens = DEFAULT_MIN_COMPRESSION_TOKENS;
+        private int largePayloadTokens = DEFAULT_LARGE_PAYLOAD_TOKENS;
+        private int offloadPreviewChars = DEFAULT_OFFLOAD_PREVIEW_CHARS;
+        private int toolArgPreviewChars = DEFAULT_TOOL_ARG_PREVIEW_CHARS;
+        private int toolResultPreviewChars = DEFAULT_TOOL_RESULT_PREVIEW_CHARS;
+        private int maxLlmCompressionCount = DEFAULT_MAX_LLM_COMPRESSION_COUNT;
+        private double currentRoundRatio = DEFAULT_CURRENT_ROUND_RATIO;
 
-        /**
-         * 触发 auto_compact 的 token 阈值。
-         *
-         * @param v token 阈值
-         * @return Builder
-         */
-        public Builder tokenThreshold(int v) {
-            this.tokenThreshold = v;
-            return this;
-        }
+        public Builder lastKeep(int v) { this.lastKeep = v; return this; }
+        public Builder msgThreshold(int v) { this.msgThreshold = v; return this; }
+        public Builder tokenThreshold(int v) { this.tokenThreshold = v; return this; }
+        public Builder minConsecutiveToolMessages(int v) { this.minConsecutiveToolMessages = v; return this; }
+        public Builder minCompressionTokens(int v) { this.minCompressionTokens = v; return this; }
+        public Builder largePayloadTokens(int v) { this.largePayloadTokens = v; return this; }
+        public Builder offloadPreviewChars(int v) { this.offloadPreviewChars = v; return this; }
+        public Builder toolArgPreviewChars(int v) { this.toolArgPreviewChars = v; return this; }
+        public Builder toolResultPreviewChars(int v) { this.toolResultPreviewChars = v; return this; }
+        public Builder maxLlmCompressionCount(int v) { this.maxLlmCompressionCount = v; return this; }
+        public Builder currentRoundRatio(double v) { this.currentRoundRatio = v; return this; }
 
-        /**
-         * micro_compact 保留最近 N 轮工具调用的完整内容。
-         *
-         * @param v 保留轮数
-         * @return Builder
-         */
-        public Builder keepRecentTools(int v) {
-            this.keepRecentTools = v;
-            return this;
-        }
-
-        /**
-         * ToolResponse 内容和 ToolCall 参数的统一压缩阈值（字符）。
-         * 超过时替换为占位符，设为 0 不截断。
-         *
-         * @param v 压缩阈值
-         * @return Builder
-         */
-        public Builder maxToolLength(int v) {
-            this.maxToolLength = v;
-            return this;
-        }
-
-        /**
-         * 受保护的工具名称集合。
-         * <p>
-         * 这些工具的 ToolResponse 和 ToolCall 参数不会被 micro_compact 替换。
-         * SkillsTool、TodoWrite 已内置保护，无需手动添加。
-         *
-         * @param tools 工具名称
-         * @return Builder
-         */
-        public Builder protectedTools(String... tools) {
-            this.protectedTools = Set.of(tools);
-            return this;
-        }
-
-        /**
-         * 构建 ContextPolicy。
-         *
-         * @return ContextPolicy 实例
-         */
         public ContextPolicy build() {
             return new ContextPolicy(
-                    tokenThreshold, keepRecentTools,
-                    maxToolLength, protectedTools
+                    lastKeep, msgThreshold, tokenThreshold,
+                    minConsecutiveToolMessages, minCompressionTokens,
+                    largePayloadTokens, offloadPreviewChars,
+                    toolArgPreviewChars, toolResultPreviewChars,
+                    maxLlmCompressionCount, currentRoundRatio
             );
         }
     }

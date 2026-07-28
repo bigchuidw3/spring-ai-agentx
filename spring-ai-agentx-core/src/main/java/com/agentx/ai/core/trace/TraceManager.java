@@ -2,7 +2,7 @@ package com.agentx.ai.core.trace;
 
 /**
  * 每对话一个实例，持有 sessionId + conversationId + TraceStore。
- * 由 {@link AgentLoopExecutor} 在每次 call/stream 时创建并存入 {@link AgentExecutionContext}。
+ * 由 AgentLoopExecutor 在每次 call/stream 时创建并存入 AgentRuntimeContext。
  *
  * @author bigchui
  */

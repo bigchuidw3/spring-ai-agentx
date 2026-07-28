@@ -21,15 +21,19 @@ import java.util.List;
  * 不依赖外部 token 计数库，保持框架轻量。
  *
  * @author bigchui
- * 
+ *
  */
 public final class TokenEstimator {
 
     private static final Logger log = LoggerFactory.getLogger(TokenEstimator.class);
 
-    /** 英文估算比率：约 4 字符 = 1 token */
+    /**
+     * 英文估算比率：约 4 字符 = 1 token
+     */
     private static final double CHARS_PER_TOKEN_EN = 4.0;
-    /** 中文估算比率：约 1.5 字符 = 1 token */
+    /**
+     * 中文估算比率：约 1.5 字符 = 1 token
+     */
     private static final double CHARS_PER_TOKEN_CJK = 1.5;
 
     private TokenEstimator() {
@@ -37,33 +41,48 @@ public final class TokenEstimator {
 
     /**
      * 估算消息列表的总 token 数。
-     * <p>
-     * 逐字符判断中英文，使用不同的换算比率。
-     * 同时打印 DEBUG 日志，方便排查压缩触发时机。
-     *
-     * @param messages 消息列表
-     * @return 估算的 token 数
      */
     public static int estimateTokens(List<Message> messages) {
         if (messages == null || messages.isEmpty()) {
             return 0;
         }
-
         int cjkCount = 0;
         int nonCjkCount = 0;
-
         for (Message msg : messages) {
             int[] counts = countChars(msg);
             cjkCount += counts[0];
             nonCjkCount += counts[1];
         }
-
-        int tokens = (int) (cjkCount / CHARS_PER_TOKEN_CJK + nonCjkCount / CHARS_PER_TOKEN_EN);
-
+        int tokens = tokensFromCounts(cjkCount, nonCjkCount);
         log.debug("Token estimation: cjkChars={}, nonCjkChars={}, estimatedTokens={}, messages={}",
                 cjkCount, nonCjkCount, tokens, messages.size());
-
         return tokens;
+    }
+
+    /**
+     * 估算单条消息的 token 数（避免循环里装箱成 List）。
+     */
+    public static int estimateTokens(Message message) {
+        if (message == null) {
+            return 0;
+        }
+        int[] counts = countChars(message);
+        return tokensFromCounts(counts[0], counts[1]);
+    }
+
+    /**
+     * 估算纯文本的 token 数。
+     */
+    public static int estimateTokens(String text) {
+        if (text == null || text.isEmpty()) {
+            return 0;
+        }
+        int[] counts = count(text);
+        return tokensFromCounts(counts[0], counts[1]);
+    }
+
+    private static int tokensFromCounts(int cjkCount, int nonCjkCount) {
+        return (int) (cjkCount / CHARS_PER_TOKEN_CJK + nonCjkCount / CHARS_PER_TOKEN_EN);
     }
 
     /**
@@ -78,29 +97,36 @@ public final class TokenEstimator {
 
         if (message instanceof SystemMessage sm) {
             int[] c = count(sm.getText());
-            cjk += c[0]; nonCjk += c[1];
+            cjk += c[0];
+            nonCjk += c[1];
         } else if (message instanceof UserMessage um) {
             int[] c = count(um.getText());
-            cjk += c[0]; nonCjk += c[1];
+            cjk += c[0];
+            nonCjk += c[1];
         } else if (message instanceof AssistantMessage am) {
             int[] c = count(am.getText());
-            cjk += c[0]; nonCjk += c[1];
+            cjk += c[0];
+            nonCjk += c[1];
             if (am.getToolCalls() != null) {
                 for (AssistantMessage.ToolCall tc : am.getToolCalls()) {
                     int[] cn = count(tc.name());
-                    cjk += cn[0]; nonCjk += cn[1];
+                    cjk += cn[0];
+                    nonCjk += cn[1];
                     int[] ca = count(tc.arguments());
-                    cjk += ca[0]; nonCjk += ca[1];
+                    cjk += ca[0];
+                    nonCjk += ca[1];
                 }
             }
         } else if (message instanceof ToolResponseMessage trm) {
             for (ToolResponseMessage.ToolResponse resp : trm.getResponses()) {
                 int[] c = count(resp.responseData());
-                cjk += c[0]; nonCjk += c[1];
+                cjk += c[0];
+                nonCjk += c[1];
             }
         } else {
             int[] c = count(message.toString());
-            cjk += c[0]; nonCjk += c[1];
+            cjk += c[0];
+            nonCjk += c[1];
         }
 
         return new int[]{cjk, nonCjk};

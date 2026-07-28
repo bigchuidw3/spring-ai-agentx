@@ -3,9 +3,8 @@ package com.agentx.ai.core.agent.internal;
 import com.agentx.ai.core.model.AgentStreamEvent;
 import com.agentx.ai.core.model.PendingToolCall;
 import com.agentx.ai.core.model.RunnableParams;
-import com.agentx.ai.core.stage.AgentExecutionContext;
+import com.agentx.ai.core.stage.AgentRuntimeContext;
 import com.agentx.ai.core.stage.StageOutputManager;
-import com.agentx.ai.core.timeline.TimelineCollector;
 import com.agentx.ai.core.tools.TodoWriteTool;
 import com.alibaba.fastjson2.JSON;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -116,7 +115,8 @@ public class ToolCallExecutor {
     public void executeNonPendingTools(List<AssistantMessage.ToolCall> allToolCalls,
                                        List<PendingToolCall> pending,
                                        List<Message> messages,
-                                       RunnableParams params) {
+                                       RunnableParams params,
+                                       AgentRuntimeContext runtimeCtx) {
         Set<String> pendingIds = new HashSet<>();
         for (PendingToolCall ptc : pending) {
             pendingIds.add(ptc.id());
@@ -125,7 +125,11 @@ public class ToolCallExecutor {
         for (AssistantMessage.ToolCall tc : allToolCalls) {
             if (!pendingIds.contains(tc.id())) {
                 ToolExecutionResult result = executeSingleTool(tc, params);
-                addToolCallMessages(tc, result, messages);
+                List<Message> collected = collectToolCallMessages(tc, result);
+                messages.addAll(collected);
+                if (runtimeCtx != null) {
+                    runtimeCtx.appendOriginalMessages(collected);
+                }
             }
         }
     }
@@ -138,7 +142,7 @@ public class ToolCallExecutor {
                                       List<AssistantMessage.ToolCall> toolCalls,
                                       List<Message> messages,
                                       RunnableParams params,
-                                      AgentExecutionContext execCtx,
+                                      AgentRuntimeContext runtimeCtx,
                                       Runnable onComplete) {
         int total = toolCalls.size();
         AtomicInteger completedCount = new AtomicInteger(0);
@@ -164,27 +168,21 @@ public class ToolCallExecutor {
                     int completed = completedCount.incrementAndGet();
                     if (completed >= total) {
                         appendResultsInOrder(results, messages);
+                        if (runtimeCtx != null) {
+                            for (List<Message> result : results) {
+                                runtimeCtx.appendOriginalMessages(result);
+                            }
+                        }
 
                         for (ToolExecDetail detail : execDetails) {
                             if (detail.error == null) {
                                 sink.tryEmitNext(new AgentStreamEvent.ToolEnd(
                                         detail.toolCall.name(), detail.toolCall.id(), detail.rawResult));
 
-                                // 时间线收集：工具完成
-                                if (execCtx != null) {
-                                    execCtx.getTimelineCollector().onToolEnd(detail.toolCall.id(), detail.rawResult);
-                                }
+                                emitTodoProgressIfNeeded(detail.toolCall.name(), detail.toolCall.arguments(), sink);
 
-                                // TodoWrite 进度事件
-                                emitTodoProgressIfNeeded(detail.toolCall.name(), detail.toolCall.arguments(),
-                                        sink, execCtx != null ? execCtx.getTimelineCollector() : null);
-
-                                if (execCtx != null) {
-                                    execCtx.addToolRecord(detail.toolCall.name(), detail.toolCall.id(),
-                                            detail.toolCall.arguments(), detail.rawResult);
-                                    if (!stageManager.isEmpty()) {
-                                        stageManager.afterToolEnd(execCtx.toStageContext(), sink::tryEmitNext);
-                                    }
+                                if (runtimeCtx != null && !stageManager.isEmpty()) {
+                                    stageManager.afterToolEnd(runtimeCtx.toStageContext(), sink::tryEmitNext);
                                 }
                             }
                         }
@@ -406,17 +404,13 @@ public class ToolCallExecutor {
     }
 
     private void emitTodoProgressIfNeeded(String toolName, String arguments,
-                                           Sinks.Many<AgentStreamEvent> sink,
-                                           TimelineCollector collector) {
+                                           Sinks.Many<AgentStreamEvent> sink) {
         if (!"TodoWrite".equals(toolName)) {
             return;
         }
         try {
             List<TodoWriteTool.TodoItem> items = JSON.parseObject(arguments).getList("todos", TodoWriteTool.TodoItem.class);
             sink.tryEmitNext(new AgentStreamEvent.TodoProgress(items));
-            if (collector != null) {
-                collector.onTodoProgress(items);
-            }
         } catch (Exception e) {
             log.warn("解析 TodoWrite 参数失败，跳过 TodoProgress 事件: {}", e.getMessage());
         }

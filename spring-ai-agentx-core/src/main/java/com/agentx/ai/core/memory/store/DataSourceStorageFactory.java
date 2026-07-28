@@ -33,12 +33,46 @@ public class DataSourceStorageFactory {
      *
      * @param dataSource 数据源
      * @return ChatMemory 实例
+     * @deprecated 主流程已切换到 {@link #createSessionMessageStore} + {@link #createConversationStore}，
+     * 完整消息链存储替代 QA 对存储。保留仅供旧调用方兼容。
      */
+    @Deprecated
     public static ChatMemory createChatMemory(DataSource dataSource) {
         AgentChatMemory chatMemory = new AgentChatMemory(dataSource);
         chatMemory.initialize();
         log.info("Created and initialized ChatMemory (agentx_session table)");
         return chatMemory;
+    }
+
+    /**
+     * 基于 DataSource 创建 ConversationStore。
+     *
+     * 自动创建 {@code agentx_conversation} 表，记录每次会话调用的开局与终态。
+     *
+     * @param dataSource 数据源
+     * @return ConversationStore 实例
+     */
+    public static ConversationStore createConversationStore(DataSource dataSource) {
+        ConversationStore store = new ConversationStore(dataSource);
+        store.initialize();
+        log.info("Created and initialized ConversationStore (agentx_conversation table)");
+        return store;
+    }
+
+    /**
+     * 基于 DataSource 创建 SessionMessageStore。
+     *
+     * 自动创建 {@code agentx_session} 表（新结构：完整消息链存储）。
+     * 与旧 AgentChatMemory 同表名但结构不同，迁移时需先 drop 旧表。
+     *
+     * @param dataSource 数据源
+     * @return SessionMessageStore 实例
+     */
+    public static SessionMessageStore createSessionMessageStore(DataSource dataSource) {
+        SessionMessageStore store = new SessionMessageStore(dataSource);
+        store.initialize();
+        log.info("Created and initialized SessionMessageStore (agentx_session table)");
+        return store;
     }
 
     /**
