@@ -5,7 +5,6 @@ import com.agentx.ai.core.interrupt.PauseStateStore;
 import com.agentx.ai.core.trace.TraceStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.ai.chat.memory.ChatMemory;
 
 import javax.sql.DataSource;
 
@@ -13,8 +12,9 @@ import javax.sql.DataSource;
  * DataSource 模式的存储工厂。
  *
  * 根据 DataSource 自动创建：
- * - {@link AgentChatMemory} — 会话记忆（{@code agentx_session} 表）
- * - {@link JdbcMemoryStore} — 长期记忆（{@code agentx_memory} 表）
+ * - {@link SessionMessageStore} — 会话三态（{@code agentx_session} 表）
+ * - {@link ConversationStore} — 调用边界（{@code agentx_conversation} 表）
+ * - {@link TraceStore} — LLM 调用审计（{@code agentx_trace} 表）
  * - {@link JdbcPauseStateStore} — 暂停快照（{@code agentx_pause_state} 表）
  *
  * 所有表统一以 {@code agentx_} 前缀命名，框架自动建表。
@@ -25,24 +25,6 @@ import javax.sql.DataSource;
 public class DataSourceStorageFactory {
 
     private static final Logger log = LoggerFactory.getLogger(DataSourceStorageFactory.class);
-
-    /**
-     * 基于 DataSource 创建 ChatMemory。
-     *
-     * 自动创建 {@code agentx_session} 表。
-     *
-     * @param dataSource 数据源
-     * @return ChatMemory 实例
-     * @deprecated 主流程已切换到 {@link #createSessionMessageStore} + {@link #createConversationStore}，
-     * 完整消息链存储替代 QA 对存储。保留仅供旧调用方兼容。
-     */
-    @Deprecated
-    public static ChatMemory createChatMemory(DataSource dataSource) {
-        AgentChatMemory chatMemory = new AgentChatMemory(dataSource);
-        chatMemory.initialize();
-        log.info("Created and initialized ChatMemory (agentx_session table)");
-        return chatMemory;
-    }
 
     /**
      * 基于 DataSource 创建 ConversationStore。
@@ -62,8 +44,7 @@ public class DataSourceStorageFactory {
     /**
      * 基于 DataSource 创建 SessionMessageStore。
      *
-     * 自动创建 {@code agentx_session} 表（新结构：完整消息链存储）。
-     * 与旧 AgentChatMemory 同表名但结构不同，迁移时需先 drop 旧表。
+     * 自动创建 {@code agentx_session} 表（完整消息链存储）。
      *
      * @param dataSource 数据源
      * @return SessionMessageStore 实例
@@ -88,21 +69,6 @@ public class DataSourceStorageFactory {
         traceStore.initialize();
         log.info("Created and initialized TraceStore (agentx_trace table)");
         return traceStore;
-    }
-
-    /**
-     * 基于 DataSource 创建 MemoryStore。
-     *
-     * 自动创建 {@code agentx_memory} 表。
-     *
-     * @param dataSource 数据源
-     * @return MemoryStore 实例
-     */
-    public static MemoryStore createMemoryStore(DataSource dataSource) {
-        JdbcMemoryStore store = new JdbcMemoryStore(dataSource);
-        store.initialize();
-        log.info("Created and initialized MemoryStore (agentx_memory table)");
-        return store;
     }
 
     /**

@@ -388,54 +388,54 @@ public class InterruptResumeTest {
                 .maxRounds(5)
                 .build();
 
-//        String conversationId = "conv-test7-" + UUID.randomUUID();
-//        RunnableParams params = RunnableParams.builder().conversationId(conversationId).build();
-//
-//        String query = "请调用 slow_task 工具，任务描述：测试中断恢复";
-//        System.out.println("Q: " + query);
-//
-//        // 5s 后触发 interrupt（slow_task 需要 5s，所以一定在工具执行中中断）
-//        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-//        scheduler.schedule(() -> {
-//            System.out.println("\n[5s 后] 触发 interrupt...");
-//            boolean ok = agent.interrupt(conversationId, "非流式中断测试");
-//            System.out.println("[interrupt 返回] " + ok);
-//        }, 5000, TimeUnit.MILLISECONDS);
-//
-//        AgentResult result = agent.callForResult(query, params);
-//        scheduler.shutdown();
-//
-//        if (!(result instanceof AgentResult.Paused p)) {
-//            System.out.println("❌ 期望 AgentResult.Paused，实际: " + result.getClass().getSimpleName());
-//            return;
-//        }
-//
-//        PauseState pauseState = p.state();
-//        System.out.println("\n--- 中断结果分析 ---");
-//        System.out.println("reason          = " + pauseState.getReason()
-//                + (pauseState.getReason() == PauseReason.USER_INTERRUPT ? " ✅" : " ❌"));
-//        System.out.println("safePoint  = " + pauseState.getSafePoint());
-//        System.out.println("currentRound    = " + pauseState.getCurrentRound());
-//        System.out.println("interruptMessage= " + pauseState.getInterruptMessage());
-//        printPendingToolCalls(pauseState);
-//
-//        // 验证 stateStore 已保存
-//        System.out.println("\nstateStore hasState = " + agent.hasInterruptedState(conversationId)
-//                + (agent.hasInterruptedState(conversationId) ? " ✅" : " ❌"));
+        String conversationId = "conv-test7-" + UUID.randomUUID();
+        RunnableParams params = RunnableParams.builder().conversationId(conversationId).build();
 
-        // === 恢复 ===
-        System.out.println("\n--- 恢复执行 ---");
-        PauseState pauseState = agent.getInterruptedState("conv-test7-415840d7-8a1b-4f50-aeba-1118f4e4c9be");
-        AgentResult result = agent.resume(pauseState, Map.of());
+        String query = "请调用 slow_task 工具，任务描述：测试中断恢复";
+        System.out.println("Q: " + query);
 
-        if (result instanceof AgentResult.Completed c) {
-            System.out.println("A: " + c.answer());
-            System.out.println("✅ 恢复后正常完成");
-        } else if (result instanceof AgentResult.Paused p2) {
-            System.out.println("⚠️ 恢复后再次暂停（reason=" + p2.state().getReason() + "）");
-        } else {
-            System.out.println("❌ 非预期结果: " + result.getClass().getSimpleName());
+        // 5s 后触发 interrupt（slow_task 需要 5s，所以一定在工具执行中中断）
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        scheduler.schedule(() -> {
+            System.out.println("\n[5s 后] 触发 interrupt...");
+            boolean ok = agent.interrupt(conversationId, "非流式中断测试");
+            System.out.println("[interrupt 返回] " + ok);
+        }, 5000, TimeUnit.MILLISECONDS);
+
+        AgentResult result = agent.callForResult(query, params);
+        scheduler.shutdown();
+
+        if (!(result instanceof AgentResult.Paused p)) {
+            System.out.println("❌ 期望 AgentResult.Paused，实际: " + result.getClass().getSimpleName());
+            return;
         }
+
+        PauseState pauseState = p.state();
+        System.out.println("\n--- 中断结果分析 ---");
+        System.out.println("reason          = " + pauseState.getReason()
+                + (pauseState.getReason() == PauseReason.USER_INTERRUPT ? " ✅" : " ❌"));
+        System.out.println("safePoint  = " + pauseState.getSafePoint());
+        System.out.println("currentRound    = " + pauseState.getCurrentRound());
+        System.out.println("interruptMessage= " + pauseState.getInterruptMessage());
+        printPendingToolCalls(pauseState);
+
+        // 验证 stateStore 已保存
+        System.out.println("\nstateStore hasState = " + agent.hasInterruptedState(conversationId)
+                + (agent.hasInterruptedState(conversationId) ? " ✅" : " ❌"));
+
+//        // === 恢复 ===
+//        System.out.println("\n--- 恢复执行 ---");
+//        PauseState pauseState = agent.getInterruptedState("conv-test7-415840d7-8a1b-4f50-aeba-1118f4e4c9be");
+//        AgentResult result = agent.resume(pauseState, Map.of());
+//
+//        if (result instanceof AgentResult.Completed c) {
+//            System.out.println("A: " + c.answer());
+//            System.out.println("✅ 恢复后正常完成");
+//        } else if (result instanceof AgentResult.Paused p2) {
+//            System.out.println("⚠️ 恢复后再次暂停（reason=" + p2.state().getReason() + "）");
+//        } else {
+//            System.out.println("❌ 非预期结果: " + result.getClass().getSimpleName());
+//        }
     }
 
     /**

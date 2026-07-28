@@ -7,12 +7,12 @@ import com.agentx.ai.core.context.compress.LlmSummarizer;
 import com.agentx.ai.core.context.compress.NoOpOffloadStore;
 import com.agentx.ai.core.context.compress.OffloadStore;
 import com.agentx.ai.core.context.compress.SessionBackedOffloadStore;
-import com.agentx.ai.core.context.compress.l1.HistoricalToolListStrategy;
-import com.agentx.ai.core.context.compress.l2.LargeMsgOffloadWithKeepStrategy;
-import com.agentx.ai.core.context.compress.l3.LargeMsgOffloadNoKeepStrategy;
-import com.agentx.ai.core.context.compress.l4.HistoricalRoundSummaryStrategy;
-import com.agentx.ai.core.context.compress.l5.CurrentRoundLargeMsgStrategy;
-import com.agentx.ai.core.context.compress.l6.CurrentRoundOverallStrategy;
+import com.agentx.ai.core.context.compress.strategy.HistoricalToolListStrategy;
+import com.agentx.ai.core.context.compress.strategy.LargeMsgOffloadWithKeepStrategy;
+import com.agentx.ai.core.context.compress.strategy.LargeMsgOffloadNoKeepStrategy;
+import com.agentx.ai.core.context.compress.strategy.HistoricalRoundSummaryStrategy;
+import com.agentx.ai.core.context.compress.strategy.CurrentRoundLargeMsgStrategy;
+import com.agentx.ai.core.context.compress.strategy.CurrentRoundOverallStrategy;
 import com.agentx.ai.core.advisors.PauseAdvisor;
 import com.agentx.ai.core.advisors.RequestLoggingAdvisor;
 import com.agentx.ai.core.agent.internal.AgentLoopExecutor;
@@ -27,10 +27,9 @@ import com.agentx.ai.core.model.RunnableParams;
 import com.agentx.ai.core.model.StageOutputProvider;
 import com.agentx.ai.core.model.StageTiming;
 import com.agentx.ai.core.model.ThinkingMode;
-import com.agentx.ai.core.memory.semantic.SemanticMemoryManager;
+import com.agentx.ai.core.memory.LongTermMemoryConfig;
+import com.agentx.ai.core.memory.LongTermMemoryManager;
 import com.agentx.ai.core.memory.store.DataSourceStorageFactory;
-import com.agentx.ai.core.memory.store.MemoryStore;
-import com.agentx.ai.core.memory.store.SemanticMemoryStore;
 import com.agentx.ai.core.memory.store.SessionMessageStore;
 import com.agentx.ai.core.memory.store.ConversationStore;
 import com.agentx.ai.core.tools.AskUserTool;
@@ -54,7 +53,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.function.Supplier;
 
 /**
@@ -83,10 +81,8 @@ public class ReactAgent {
     private final String instructions;
     private final SessionMessageStore sessionMessageStore;
     private final ConversationStore conversationStore;
-    private final MemoryStore memoryStore;
-    private final SemanticMemoryManager semanticMemoryManager;
+    private final LongTermMemoryManager longTermMemoryManager;
     private final DataSource dataSource;
-    private final boolean enableProfileMemory;
     private boolean enableSession;
     private final List<StageOutputProvider> stageOutputProviders;
     private final ThinkingMode thinkingMode;
@@ -102,18 +98,13 @@ public class ReactAgent {
      * 配合 {@link #hasInterruptedState(String)} / {@link #resumeStream(String)} 实现断点重连。
      */
     private final PauseStateStore stateStore;
-    private final int maxHistoryRounds;
-    private final int maxHistoryTokens;
-    private final int sessionSummarizeStep;
 
     private ReactAgent(Builder builder, SessionMessageStore sessionMessageStore,
-                       ConversationStore conversationStore, MemoryStore memoryStore,
-                       SemanticMemoryManager semanticMemoryManager, TraceStore traceStore,
+                       ConversationStore conversationStore,
+                       LongTermMemoryManager longTermMemoryManager,
+                       TraceStore traceStore,
                        PauseStateStore stateStore) {
         this.deferredToolRegistry = builder.deferredToolRegistry;
-        this.maxHistoryRounds = builder.maxHistoryRounds;
-        this.maxHistoryTokens = builder.maxHistoryTokens;
-        this.sessionSummarizeStep = builder.sessionSummarizeStep;
 
         // 构建 ChatClient，统一配置工具选项和 Advisors
         ChatClient.Builder clientBuilder = ChatClient.builder(builder.chatModel);
@@ -145,10 +136,8 @@ public class ReactAgent {
         this.instructions = builder.instructions;
         this.sessionMessageStore = sessionMessageStore;
         this.conversationStore = conversationStore;
-        this.memoryStore = memoryStore;
-        this.semanticMemoryManager = semanticMemoryManager;
+        this.longTermMemoryManager = longTermMemoryManager;
         this.dataSource = builder.dataSource;
-        this.enableProfileMemory = builder.enableProfileMemory;
         this.enableSession = builder.enableSession;
         this.stageOutputProviders = builder.stageOutputProviders;
         this.thinkingMode = builder.thinkingMode;
@@ -185,19 +174,15 @@ public class ReactAgent {
                 .sessionMessageStore(sessionMessageStore)
                 .conversationStore(conversationStore)
                 .instructions(instructions)
-                .memoryStore(memoryStore)
                 .chatModel(chatModel)
-                .enableProfileMemory(enableProfileMemory)
+                .longTermMemoryManager(longTermMemoryManager)
                 .enableSession(enableSession)
                 .enableTrace(enableTrace)
                 .askUserToolName(askUserToolName)
                 .stageOutputProviders(stageOutputProviders)
                 .thinkingMode(thinkingMode)
                 .maxRetries(maxRetries)
-                .advisors(advisors)
-                .maxHistoryRounds(maxHistoryRounds)
-                .maxHistoryTokens(maxHistoryTokens)
-                .sessionSummarizeStep(sessionSummarizeStep);
+                .advisors(advisors);
 
         // 上下文压缩（可选）
         if (this.contextPolicy != null) {
@@ -230,9 +215,9 @@ public class ReactAgent {
             }
         }
 
-        // 语义记忆（可选第三层）
-        if (semanticMemoryManager != null) {
-            executorBuilder.semanticMemoryManager(semanticMemoryManager);
+        // 长期记忆（可选）
+        if (longTermMemoryManager != null) {
+            executorBuilder.longTermMemoryManager(longTermMemoryManager);
         }
 
         // 延迟工具注册（可选）
@@ -519,7 +504,7 @@ public class ReactAgent {
      * <p>
      * - 禁用 session：不记录 agentx_session<br>
      * - 注入父 TraceStore：复用父 Agent 的 trace 审计（受父 enableTrace 控制，null 则不记录）<br>
-     * - profile memory 天然无：SubAgent 无 DataSource，不创建 memoryStore
+     * - 长期记忆天然无：SubAgent 不持有 LongTermMemoryManager
      * <p>
      * createExecutor() 每次调用时读取这些字段，因此构建后设置即可生效。
      */
@@ -538,10 +523,6 @@ public class ReactAgent {
 
     public String getInstructions() {
         return instructions;
-    }
-
-    public MemoryStore getMemoryStore() {
-        return memoryStore;
     }
 
     public List<Advisor> getAdvisors() {
@@ -585,8 +566,7 @@ public class ReactAgent {
         private AgentTaskManager taskManager;
         private String instructions;
         private DataSource dataSource;
-        private SemanticMemoryStore semanticMemoryStore;
-        private boolean enableProfileMemory = true;
+        private LongTermMemoryConfig longTermMemoryConfig;
         private boolean enableSession = true;
         private boolean askUser = false;
         private final List<StageOutputProvider> stageOutputProviders = new ArrayList<>();
@@ -596,9 +576,6 @@ public class ReactAgent {
         private DeferredToolRegistry deferredToolRegistry;
         private boolean enableTrace = true;
         private PauseStateStore stateStore;
-        private int maxHistoryRounds = 30;
-        private int maxHistoryTokens = 10000;
-        private int sessionSummarizeStep = 5;
         private final List<Supplier<ReactAgent>> subAgentProviders = new ArrayList<>();
 
         public Builder name(String name) {
@@ -660,15 +637,14 @@ public class ReactAgent {
         }
 
         /**
-         * 配置 DataSource，框架自动管理会话记忆和长期记忆。
+         * 配置 DataSource，框架自动管理会话存储与追踪存储。
          * <p>
          * 框架将自动创建：
-         * - ChatMemory - 基于 AgentChatMemory（agentx_session 表）
-         * - MemoryStore - 基于 JdbcMemoryStore（agentx_memory 表）
+         * - SessionMessageStore：当前会话三态（agentx_session 表）
+         * - ConversationStore：调用边界（agentx_conversation 表）
+         * - TraceStore：LLM 调用审计（agentx_trace 表）
          * <p>
-         * 长期记忆的读写由框架自动管理，不依赖 Agent 工具调用：
-         * - 读：buildMemorySection() 在会话开始时自动注入 system prompt
-         * - 写：MemoryExtractor 在对话结束后自动提取并保存
+         * 长期记忆是独立维度，通过 {@link #longTermMemory(LongTermMemoryConfig)} 单独控制。
          * <p>
          * 依赖要求：spring-jdbc（或 spring-boot-starter-jdbc）
          *
@@ -680,37 +656,22 @@ public class ReactAgent {
         }
 
         /**
-         * 配置语义记忆存储，启用第三层记忆（RAG 检索）。
+         * 启用长期记忆。传入 {@link LongTermMemoryConfig} 即启用，不调用即不启用。
+         * <p>
+         * 配置内封装了独立的 PgVector DataSource 与 EmbeddingModel，
+         * 与 {@link #dataSource(DataSource)} 指向的关系型库互不相关。
          * <p>
          * 启用后，框架会：
-         * - 每次对话后异步保存 Q&A 到 VectorStore
-         * - 对话开始时通过语义检索注入相关历史知识
-         * - Q&A 数量达到阈值（默认 30）后自动合并为摘要
-         * <p>
-         * 不传入此配置时，语义记忆不启用，只有短期记忆和用户画像。
+         * <ul>
+         *   <li>每次调用开始时按 userId + query 语义检索相关记忆，注入 system prompt</li>
+         *   <li>调用终态（completed）后异步抽取本次 transcript 的可跨会话事实，写入向量库</li>
+         *   <li>命中相似记忆时通过 LLM 合并，避免冲突</li>
+         * </ul>
          *
-         * @param semanticMemoryStore 语义记忆配置（VectorStore + EmbeddingModel）
+         * @param config 长期记忆配置
          */
-        public Builder semanticMemoryStore(SemanticMemoryStore semanticMemoryStore) {
-            this.semanticMemoryStore = semanticMemoryStore;
-            return this;
-        }
-
-        /**
-         * 是否启用用户画像记忆。
-         * <p>
-         * 启用后，框架会自动从对话中提取用户信息并持久化到 agentx_memory 表，
-         * 在后续会话中自动注入到 system prompt。
-         * <p>
-         * 禁用后，框架只管理短期会话记忆（agentx_session），不做用户画像提取和注入。
-         * 适用于对安全性要求较高的场景，防止用户通过对话诱导智能体生成不当记忆。
-         * <p>
-         * 默认启用。
-         *
-         * @param enabled true 启用（默认），false 禁用
-         */
-        public Builder enableProfileMemory(boolean enabled) {
-            this.enableProfileMemory = enabled;
+        public Builder longTermMemory(LongTermMemoryConfig config) {
+            this.longTermMemoryConfig = config;
             return this;
         }
 
@@ -973,68 +934,25 @@ public class ReactAgent {
             return this;
         }
 
-        /**
-         * 设置对话历史加载的最大轮数，默认 30。
-         * <p>
-         * 传 0 或负值时关闭轮数限制（全量加载）。
-         * 与 {@link #maxHistoryTokens(int)} 共同作用，先按轮数截断再按 token 截断。
-         *
-         * @param maxHistoryRounds 最大历史轮数，≤ 0 表示不限制
-         */
-        public Builder maxHistoryRounds(int maxHistoryRounds) {
-            this.maxHistoryRounds = maxHistoryRounds;
-            return this;
-        }
-
-        /**
-         * 设置对话历史加载的估算 token 上限，默认 10000。
-         * <p>
-         * 传 0 或负值时关闭 token 限制。先按轮数加载，再按 token 从前往后截断完整 Q&A 对。
-         *
-         * @param maxHistoryTokens 最大估算 token 数，≤ 0 表示不限制
-         */
-        public Builder maxHistoryTokens(int maxHistoryTokens) {
-            this.maxHistoryTokens = maxHistoryTokens;
-            return this;
-        }
-
-        /**
-         * 设置会话溢出摘要的步长，默认 5。
-         * <p>
-         * 当会话 qa_pair 数量超过 {@link #maxHistoryRounds(int)} 后，
-         * 每累积 step 条溢出轮次才触发一次 session_summary 重新生成，
-         * 避免相邻轮次频繁触发摘要。
-         * <p>
-         * 例如 maxHistoryRounds=30, step=5：第 35、40、45... 轮时触发。
-         *
-         * @param step 摘要步长，≤ 0 时关闭会话溢出摘要
-         */
-        public Builder sessionSummarizeStep(int step) {
-            this.sessionSummarizeStep = step;
-            return this;
-        }
-
         public ReactAgent build() {
             Objects.requireNonNull(chatModel, "chatModel must not be null");
 
             SessionMessageStore sessionMessageStore = null;
             ConversationStore conversationStore = null;
-            MemoryStore memoryStore = null;
-            SemanticMemoryManager semanticMemoryManager = null;
 
-            // 传入 DataSource 时，框架创建所有存储对象（session/memory/trace/conversation）
+            // 传入 DataSource 时，框架创建会话/调用边界/追踪存储
             // 是否实际写入由各 enableXXX 在运行时控制
             TraceStore traceStore = null;
             if (dataSource != null) {
                 sessionMessageStore = DataSourceStorageFactory.createSessionMessageStore(dataSource);
                 conversationStore = DataSourceStorageFactory.createConversationStore(dataSource);
-                memoryStore = DataSourceStorageFactory.createMemoryStore(dataSource);
                 traceStore = DataSourceStorageFactory.createTraceStore(dataSource);
             }
 
-            // 传入 SemanticMemoryStore 时，启用语义记忆（第三层）
-            if (semanticMemoryStore != null) {
-                semanticMemoryManager = new SemanticMemoryManager(semanticMemoryStore, this.chatModel);
+            // 传入 LongTermMemoryConfig 时，启用长期记忆
+            LongTermMemoryManager longTermMemoryManager = null;
+            if (longTermMemoryConfig != null) {
+                longTermMemoryManager = new LongTermMemoryManager(longTermMemoryConfig, chatModel);
             }
 
             // taskManager 默认实例化：流式停止 / 用户主动中断都依赖它，
@@ -1043,7 +961,9 @@ public class ReactAgent {
                 taskManager = new AgentTaskManager();
             }
 
-            // askUser=true 时自动注册内置 AskUserTool + PauseAdvisor
+            // askUser=true 时自动注册内置 AskUserTool + 默认 ask_user 拦截器。
+            // 若调用方已显式配置了会拦截 ask_user 的 PauseAdvisor，则视为覆盖默认行为，
+            // 框架不再重复添加，避免同一个 ask_user 被双重拦截。
             if (askUser) {
                 tools.addAll(List.of(AskUserTool.create()));
 
@@ -1081,8 +1001,8 @@ public class ReactAgent {
                 tools.add(new SubAgentTool.SubAgentToolCallback(agentName, agentDesc, wrappedProvider));
             }
 
-            return new ReactAgent(this, sessionMessageStore, conversationStore, memoryStore,
-                    semanticMemoryManager, traceStore,
+            return new ReactAgent(this, sessionMessageStore, conversationStore,
+                    longTermMemoryManager, traceStore,
                     stateStore != null ? stateStore : new InMemoryPauseStateStore());
         }
     }

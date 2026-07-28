@@ -22,11 +22,10 @@ import com.agentx.ai.core.stage.ThinkTagParser;
 import com.agentx.ai.core.utils.JsonRepairUtil;
 
 import com.agentx.ai.core.context.ContextCompactor;
-import com.agentx.ai.core.memory.semantic.SemanticMemoryManager;
+import com.agentx.ai.core.memory.LongTermMemoryManager;
 import com.agentx.ai.core.memory.store.ConversationStore;
 import com.agentx.ai.core.memory.store.SessionMessageStore;
 import com.agentx.ai.core.tools.toolsearch.DeferredToolRegistry;
-import com.agentx.ai.core.memory.store.MemoryStore;
 import com.agentx.ai.core.memory.util.MemoryInjector;
 import com.agentx.ai.core.memory.util.MemoryPersistor;
 import com.agentx.ai.core.trace.TraceStore;
@@ -38,8 +37,8 @@ import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
-import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.lang.Nullable;
 import reactor.core.Disposable;
@@ -130,14 +129,10 @@ public class AgentLoopExecutor {
                 builder.deferredToolRegistry, deferredToolSession);
 
         // 记忆注入器（对话开始时加载）
-        this.memoryInjector = new MemoryInjector(
-                builder.memoryStore, builder.semanticMemoryManager, builder.enableProfileMemory);
+        this.memoryInjector = new MemoryInjector(builder.longTermMemoryManager);
 
         // 记忆持久化器（委托给 SessionPersister 使用）
-        MemoryPersistor memoryPersistor = new MemoryPersistor(
-                builder.memoryStore, builder.chatModel,
-                builder.semanticMemoryManager, builder.enableProfileMemory,
-                builder.maxHistoryRounds, builder.sessionSummarizeStep);
+        MemoryPersistor memoryPersistor = new MemoryPersistor(builder.longTermMemoryManager);
 
         // 会话/Trace/暂停状态 统一持久化入口
         this.sessionPersister = new SessionPersister(
@@ -169,10 +164,8 @@ public class AgentLoopExecutor {
         private SessionMessageStore sessionMessageStore;
         private ConversationStore conversationStore;
         private String instructions;
-        private MemoryStore memoryStore;
         private ChatModel chatModel;
-        private SemanticMemoryManager semanticMemoryManager;
-        private boolean enableProfileMemory = true;
+        private LongTermMemoryManager longTermMemoryManager;
         private boolean enableSession = true;
         private boolean enableTrace = true;
         private String askUserToolName;
@@ -184,9 +177,6 @@ public class AgentLoopExecutor {
         private List<Advisor> advisors;
         private TraceStore traceStore;
         private PauseStateStore stateStore;
-        private int maxHistoryRounds = 30;
-        private int maxHistoryTokens = 10000;
-        private int sessionSummarizeStep = 5;
 
         public Builder chatClient(ChatClient v) {
             this.chatClient = v;
@@ -223,23 +213,13 @@ public class AgentLoopExecutor {
             return this;
         }
 
-        public Builder memoryStore(MemoryStore v) {
-            this.memoryStore = v;
+        public Builder longTermMemoryManager(LongTermMemoryManager v) {
+            this.longTermMemoryManager = v;
             return this;
         }
 
         public Builder chatModel(ChatModel v) {
             this.chatModel = v;
-            return this;
-        }
-
-        public Builder semanticMemoryManager(SemanticMemoryManager v) {
-            this.semanticMemoryManager = v;
-            return this;
-        }
-
-        public Builder enableProfileMemory(boolean v) {
-            this.enableProfileMemory = v;
             return this;
         }
 
@@ -295,21 +275,6 @@ public class AgentLoopExecutor {
 
         public Builder stateStore(PauseStateStore v) {
             this.stateStore = v;
-            return this;
-        }
-
-        public Builder maxHistoryRounds(int v) {
-            this.maxHistoryRounds = v;
-            return this;
-        }
-
-        public Builder maxHistoryTokens(int v) {
-            this.maxHistoryTokens = v;
-            return this;
-        }
-
-        public Builder sessionSummarizeStep(int v) {
-            this.sessionSummarizeStep = v;
             return this;
         }
 
@@ -462,6 +427,7 @@ public class AgentLoopExecutor {
         AgentRuntimeContext execCtx = new AgentRuntimeContext(state.getQuery(), state.getParams());
         // 暂停时已落库 [query .. assistant(tool_calls)]，本次恢复只持久化新增的 tool 响应及后续消息
         execCtx.setNewMsgStartIndex(state.getMessages().size());
+        execCtx.setOriginalMessagesSnapshot(new ArrayList<>(messages));
         String effectiveQuery = sessionPersister.initSessionFromResume(execCtx, state, resumeQuery);
 
         registerInterruptContext(messages, sink, state.getParams(), effectiveQuery, execCtx, roundCounter);
@@ -574,6 +540,7 @@ public class AgentLoopExecutor {
         AgentRuntimeContext execCtx = new AgentRuntimeContext(state.getQuery(), state.getParams());
         // 暂停时已落库 [query .. assistant(tool_calls)]，本次恢复只持久化新增的 tool 响应及后续消息
         execCtx.setNewMsgStartIndex(state.getMessages().size());
+        execCtx.setOriginalMessagesSnapshot(new ArrayList<>(messages));
         String effectiveQuery = sessionPersister.initSessionFromResume(execCtx, state, resumeQuery);
 
         // 发射 ResumeStart 事件，通知前端"恢复执行开始"

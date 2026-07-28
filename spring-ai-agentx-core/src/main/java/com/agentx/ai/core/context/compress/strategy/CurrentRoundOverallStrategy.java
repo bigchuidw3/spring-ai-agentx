@@ -1,4 +1,4 @@
-package com.agentx.ai.core.context.compress.l6;
+package com.agentx.ai.core.context.compress.strategy;
 
 import com.agentx.ai.core.context.TokenEstimator;
 import com.agentx.ai.core.context.compress.CompressionContext;

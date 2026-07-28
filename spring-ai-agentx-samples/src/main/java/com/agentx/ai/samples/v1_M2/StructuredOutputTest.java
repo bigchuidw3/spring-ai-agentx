@@ -138,7 +138,7 @@ public class StructuredOutputTest {
     public static void testCallResultStructured() {
         TestConfig.printTestHeader("测试 3：callForResult() — 单对象 + 集合对象");
 
-        ChatModel chatModel = TestConfig.createChatModel();
+        ChatModel chatModel = TestConfig.createDeepSeekV4ChatModel();
 
         ReactAgent agent = ReactAgent.builder()
                 .chatModel(chatModel)
@@ -200,7 +200,7 @@ public class StructuredOutputTest {
         System.out.println("ChatModel: " + TestConfig.CHAT_MODEL);
         System.out.println("===============================================");
 
-        int testNumber = 1;
+        int testNumber = 3;
 
         switch (testNumber) {
             case 1 -> testCallSingleObject();

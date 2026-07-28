@@ -35,7 +35,7 @@ import java.util.Map;
  */
 public class CompressionLayerTest {
 
-    static int testNumber = 6;
+    static int testNumber = 1;
 
     public static void main(String[] args) {
         TestConfig.printTestHeader("Compression Layer Test #" + testNumber);

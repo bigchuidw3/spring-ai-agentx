@@ -1,4 +1,4 @@
-package com.agentx.ai.core.context.compress.l2;
+package com.agentx.ai.core.context.compress.strategy;
 
 import com.agentx.ai.core.context.ContextPolicy;
 import com.agentx.ai.core.context.TokenEstimator;
@@ -24,12 +24,16 @@ public abstract class AbstractLargeMsgOffloadStrategy implements CompressionStra
 
     private static final Logger log = LoggerFactory.getLogger(AbstractLargeMsgOffloadStrategy.class);
 
-    /** 历史轮次扫描下界（inclusive），子类可覆盖。 */
+    /**
+     * 历史轮次扫描下界（inclusive），子类可覆盖。
+     */
     protected int scanStart(CompressionContext ctx) {
         return 0;
     }
 
-    /** 历史轮次扫描上界（exclusive），子类决定是否受 lastKeep 保护。 */
+    /**
+     * 历史轮次扫描上界（exclusive），子类决定是否受 lastKeep 保护。
+     */
     protected abstract int scanEnd(CompressionContext ctx);
 
     @Override

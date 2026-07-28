@@ -1,8 +1,8 @@
 package com.agentx.ai.samples.v1_M2;
 
 import com.agentx.ai.core.agent.ReactAgent;
+import com.agentx.ai.core.memory.LongTermMemoryConfig;
 import com.agentx.ai.core.model.RunnableParams;
-import com.agentx.ai.core.memory.store.SemanticMemoryStore;
 import com.agentx.ai.core.tools.BashTool;
 import com.agentx.ai.core.tools.FileSystemTools;
 import com.agentx.ai.core.tools.GrepTool;
@@ -11,7 +11,6 @@ import com.agentx.ai.samples.TestConfig;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.ai.tool.ToolCallback;
-import org.springframework.ai.vectorstore.pgvector.PgVectorStore;
 
 import javax.sql.DataSource;
 
@@ -47,10 +46,6 @@ public class FullIntegrationTest {
         DataSource mysqlDataSource = TestConfig.createMySqlDataSource();
         DataSource pgDataSource = TestConfig.createPgDataSource();
 
-        System.out.println("正在初始化 PgVectorStore...");
-        PgVectorStore vectorStore = TestConfig.createPgVectorStore(pgDataSource, embeddingModel);
-        System.out.println("PgVectorStore 初始化完成");
-
         ToolCallback[] allTools = mergeTools(
                 BashTool.create(),
                 FileSystemTools.create(),
@@ -63,7 +58,9 @@ public class FullIntegrationTest {
         ReactAgent agent = ReactAgent.builder()
                 .chatModel(chatModel)
                 .dataSource(mysqlDataSource)
-                .semanticMemoryStore(new SemanticMemoryStore(vectorStore, embeddingModel, 30))
+                .longTermMemory(LongTermMemoryConfig.builder()
+                        .vectorStore(TestConfig.createPgVectorStore(pgDataSource, embeddingModel))
+                        .build())
                 .tools(allTools)
                 .maxRounds(15)
                 .build();

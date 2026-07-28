@@ -1,4 +1,4 @@
-package com.agentx.ai.core.context.compress.l1;
+package com.agentx.ai.core.context.compress.strategy;
 
 import com.agentx.ai.core.context.ContextPolicy;
 import com.agentx.ai.core.context.TokenEstimator;

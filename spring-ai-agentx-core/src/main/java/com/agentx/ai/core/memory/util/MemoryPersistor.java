@@ -1,26 +1,22 @@
 package com.agentx.ai.core.memory.util;
 
+import com.agentx.ai.core.memory.LongTermMemoryManager;
 import com.agentx.ai.core.model.RunnableParams;
-import com.agentx.ai.core.memory.extractor.MemoryExtractor;
-import com.agentx.ai.core.memory.semantic.SemanticMemoryManager;
-import com.agentx.ai.core.memory.store.MemoryStore;
-import com.agentx.ai.core.stage.ThinkTagParser;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.chat.messages.Message;
 
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * 记忆持久化器 — 负责对话结束后的异步记忆保存。
+ * 长期记忆持久化器 — 一次完整 Agent 调用结束后，异步抽取并合并跨会话记忆。
  *
- * 从 AgentLoopExecutor 中拆分出的职责：
- * - 用户画像提取：MemoryExtractor 异步提取并保存到 MemoryStore
- * - 语义记忆保存：Q&A 异步存入 VectorStore + 检查摘要阈值
+ * 抽取单元是本次调用产生的 original_messages 片段（即 transcript 切片），
+ * 由 LongTermMemoryManager 完成 extract → dedup → merge/insert 全流程。
  *
  * @author bigchui
- *
  */
 public class MemoryPersistor {
 
@@ -35,103 +31,35 @@ public class MemoryPersistor {
                 return t;
             });
 
-    private final MemoryStore memoryStore;
-    private final ChatModel chatModel;
-    private final SemanticMemoryManager semanticMemoryManager;
-    private final boolean enableProfileMemory;
-    private final int maxHistoryRounds;
-    private final int sessionSummarizeStep;
+    private final LongTermMemoryManager longTermMemoryManager;
 
-    public MemoryPersistor(MemoryStore memoryStore, ChatModel chatModel,
-                    SemanticMemoryManager semanticMemoryManager,
-                    boolean enableProfileMemory, int maxHistoryRounds,
-                    int sessionSummarizeStep, ExecutorService executor) {
-        this.memoryStore = memoryStore;
-        this.chatModel = chatModel;
-        this.semanticMemoryManager = semanticMemoryManager;
-        this.enableProfileMemory = enableProfileMemory;
-        this.maxHistoryRounds = maxHistoryRounds;
-        this.sessionSummarizeStep = sessionSummarizeStep;
+    public MemoryPersistor(LongTermMemoryManager longTermMemoryManager) {
+        this.longTermMemoryManager = longTermMemoryManager;
     }
 
     /**
-     * 向后兼容的构造函数（忽略 executor 参数，使用静态共享线程池）。
-     */
-    public MemoryPersistor(MemoryStore memoryStore, ChatModel chatModel,
-                    SemanticMemoryManager semanticMemoryManager,
-                    boolean enableProfileMemory, int maxHistoryRounds,
-                    int sessionSummarizeStep) {
-        this.memoryStore = memoryStore;
-        this.chatModel = chatModel;
-        this.semanticMemoryManager = semanticMemoryManager;
-        this.enableProfileMemory = enableProfileMemory;
-        this.maxHistoryRounds = maxHistoryRounds;
-        this.sessionSummarizeStep = sessionSummarizeStep;
-    }
-
-    /**
-     * 对话结束后执行所有异步记忆持久化任务。
+     * 终态成功后异步抽取本次调用 transcript，写入长期记忆。
      *
-     * @param params         调用参数
-     * @param question       用户问题
-     * @param answer         助手回答
-     * @param conversationId 会话 ID
+     * @param params         调用参数（取 userId / conversationId）
+     * @param transcript     本次调用产生的原始消息链切片
      */
-    public void persist(RunnableParams params, String question, String answer, String conversationId) {
-        // 记忆提取和语义保存不需要 think 内容，统一剥离
-        String cleanAnswer = ThinkTagParser.stripThinkTags(answer);
-        extractMemoriesIfEnabled(params, question, cleanAnswer);
-        saveSemanticMemoryIfEnabled(params, question, cleanAnswer, conversationId);
-    }
-
-    /**
-     * 异步提取用户画像到 MemoryStore。
-     */
-    private void extractMemoriesIfEnabled(RunnableParams params, String question, String answer) {
-        if (!enableProfileMemory || memoryStore == null || chatModel == null
-                || params == null || params.getUserId() == null) {
+    public void persist(RunnableParams params, List<Message> transcript) {
+        if (longTermMemoryManager == null || params == null || params.getUserId() == null) {
             return;
         }
-        if (question == null || question.isEmpty() || answer == null || answer.isEmpty()) {
+        if (transcript == null || transcript.isEmpty()) {
             return;
         }
-
         String userId = params.getUserId();
+        String conversationId = params.getConversationId();
         SHARED_EXECUTOR.execute(() -> {
             try {
-                MemoryExtractor extractor = new MemoryExtractor(chatModel, memoryStore);
-                extractor.extractAndSave(userId, question, answer);
-                log.debug("Async memory extraction completed for userId={}", userId);
+                longTermMemoryManager.ingestTranscript(userId, conversationId, transcript);
+                log.debug("Async long-term memory ingestion completed: userId={}, conversationId={}",
+                        userId, conversationId);
             } catch (Exception e) {
-                log.error("Async memory extraction failed for userId={}: {}",
-                        userId, e.getMessage());
-            }
-        });
-    }
-
-    /**
-     * 异步保存 Q&A 到 VectorStore 并检查摘要阈值。
-     */
-    private void saveSemanticMemoryIfEnabled(RunnableParams params, String question,
-                                              String answer, String conversationId) {
-        if (semanticMemoryManager == null || params == null || params.getUserId() == null) {
-            return;
-        }
-        if (question == null || question.isEmpty() || answer == null || answer.isEmpty()) {
-            return;
-        }
-
-        String userId = params.getUserId();
-        SHARED_EXECUTOR.execute(() -> {
-            try {
-                semanticMemoryManager.saveQaPair(userId, question, answer, conversationId);
-                semanticMemoryManager.checkAndSummarize(userId);
-                semanticMemoryManager.checkAndSessionSummarize(userId, conversationId,
-                        maxHistoryRounds, sessionSummarizeStep);
-                log.debug("Semantic memory save completed for userId={}", userId);
-            } catch (Exception e) {
-                log.error("Semantic memory save failed for userId={}: {}",
-                        userId, e.getMessage());
+                log.error("Async long-term memory ingestion failed: userId={}, conversationId={}, err={}",
+                        userId, conversationId, e.getMessage());
             }
         });
     }

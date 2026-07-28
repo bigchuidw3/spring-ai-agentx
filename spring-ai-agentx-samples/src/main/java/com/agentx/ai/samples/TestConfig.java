@@ -285,7 +285,7 @@ public final class TestConfig {
                 .indexType(PgVectorStore.PgIndexType.HNSW)
                 .initializeSchema(true)
                 .removeExistingVectorStoreTable(false)
-                .vectorTableName(s("pg.table.name", "agent_semantic_memory"))
+                .vectorTableName(s("pg.table.name", "agentx_long_term_memory"))
                 .maxDocumentBatchSize(100)
                 .build();
         try {

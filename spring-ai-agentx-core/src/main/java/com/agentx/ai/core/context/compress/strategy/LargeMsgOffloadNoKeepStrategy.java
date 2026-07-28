@@ -1,7 +1,6 @@
-package com.agentx.ai.core.context.compress.l3;
+package com.agentx.ai.core.context.compress.strategy;
 
 import com.agentx.ai.core.context.compress.CompressionContext;
-import com.agentx.ai.core.context.compress.l2.AbstractLargeMsgOffloadStrategy;
 
 /**
  * L3 大消息 offload（不保护 lastKeep）。

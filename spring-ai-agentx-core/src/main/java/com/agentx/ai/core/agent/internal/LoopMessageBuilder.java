@@ -8,7 +8,6 @@ import com.agentx.ai.core.prompt.PromptConstants;
 import com.agentx.ai.core.tools.toolsearch.DeferredToolRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
@@ -61,7 +60,7 @@ public class LoopMessageBuilder {
         if (instructions != null && !instructions.isBlank()) {
             systemPrompt = instructions;
         }
-        systemPrompt = appendSection(systemPrompt, memoryInjector.buildMemorySection(params));
+        systemPrompt = appendSection(systemPrompt, memoryInjector.buildMemorySection(params, query));
 
         String customParamSection = buildCustomParamSection(params);
         if (!customParamSection.isEmpty()) {
@@ -77,22 +76,7 @@ public class LoopMessageBuilder {
             messages.add(new SystemMessage(systemPrompt));
         }
 
-        // 2. 记忆上下文：合并为一条 AssistantMessage，作为背景参考放在短期历史上方
-        String crossSection = memoryInjector.buildCrossSummarySection(params, query);
-        String sessionSection = memoryInjector.buildSessionSummarySection(params);
-        if (!sessionSection.isEmpty() || !crossSection.isEmpty()) {
-            StringBuilder memoryContext = new StringBuilder();
-            memoryContext.append("以下是本次对话的相关背景信息，供参考：\n\n");
-            if (!sessionSection.isEmpty()) {
-                memoryContext.append(sessionSection).append("\n\n");
-            }
-            if (!crossSection.isEmpty()) {
-                memoryContext.append(crossSection);
-            }
-            messages.add(new AssistantMessage(memoryContext.toString().trim()));
-        }
-
-        // 3. 历史消息链（优先 working_messages 压缩视图，回退 original_messages）
+        // 2. 历史消息链（优先 working_messages 压缩视图，回退 original_messages）
         String conversationId = params != null ? params.getConversationId() : null;
         if (enableSession && sessionMessageStore != null && conversationId != null) {
             List<Message> history = sessionMessageStore.getMessages(conversationId, "working_messages");

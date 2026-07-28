@@ -50,7 +50,7 @@
             <artifactId>reactor-core</artifactId>
         </dependency>
 
-        <!-- Spring JDBC (optional - for DataSource mode: AgentChatMemory + JdbcMemoryStore) -->
+        <!-- Spring JDBC (optional - for DataSource mode: agentx_session / agentx_conversation / agentx_trace) -->
         <dependency>
             <groupId>org.springframework</groupId>
             <artifactId>spring-jdbc</artifactId>
@@ -64,10 +64,17 @@
             <version>${mybatis-plus.version}</version>
         </dependency>
 
-        <!-- Spring AI VectorStore (optional - for SemanticMemory RAG) -->
+        <!-- Spring AI VectorStore (optional - for long-term memory RAG) -->
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-vector-store</artifactId>
+            <optional>true</optional>
+        </dependency>
+
+        <!-- Spring AI PgVectorStore (optional - long-term memory default backend) -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-pgvector-store</artifactId>
             <optional>true</optional>
         </dependency>
 

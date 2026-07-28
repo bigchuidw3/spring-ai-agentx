@@ -1,4 +1,4 @@
-package com.agentx.ai.core.context.compress.l2;
+package com.agentx.ai.core.context.compress.strategy;
 
 import com.agentx.ai.core.context.compress.CompressionContext;
 

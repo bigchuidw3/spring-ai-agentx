@@ -169,8 +169,10 @@ public class SessionPersister {
         try {
             int start = execCtx.getNewMsgStartIndex();
             List<Message> originalSnapshot = execCtx.getOriginalMessagesSnapshot();
-            if (originalSnapshot != null && start < originalSnapshot.size()) {
-                List<Message> thisCallMessages = new ArrayList<>(originalSnapshot.subList(start, originalSnapshot.size()));
+            List<Message> thisCallMessages = (originalSnapshot != null && start < originalSnapshot.size())
+                    ? new ArrayList<>(originalSnapshot.subList(start, originalSnapshot.size()))
+                    : List.of();
+            if (!thisCallMessages.isEmpty()) {
                 sessionMessageStore.appendMessages(
                         conversationId, execCtx.getSessionId(),
                         "original_messages", thisCallMessages);
@@ -181,9 +183,8 @@ public class SessionPersister {
             if (conversationStore != null) {
                 conversationStore.updateStatus(execCtx.getSessionId(), status);
             }
-            if ("completed".equals(status) && memoryPersistor != null) {
-                memoryPersistor.persist(execCtx.getParams(), execCtx.getQuery(),
-                        extractFinalAnswer(messages, execCtx.getNewMsgStartIndex()), conversationId);
+            if ("completed".equals(status) && memoryPersistor != null && !thisCallMessages.isEmpty()) {
+                memoryPersistor.persist(execCtx.getParams(), thisCallMessages);
             }
         } catch (Exception e) {
             log.error("Failed to persist terminal session: {}", e.getMessage());
@@ -213,18 +214,5 @@ public class SessionPersister {
         }
         stateStore.delete(conversationId);
         return true;
-    }
-
-    /**
-     * 取本次新增消息链里最后一个 AssistantMessage 的文本作为最终答案。
-     */
-    private String extractFinalAnswer(List<Message> messages, int startIdx) {
-        String answer = null;
-        for (int i = startIdx; i < messages.size(); i++) {
-            if (messages.get(i) instanceof AssistantMessage am && am.getText() != null && !am.getText().isEmpty()) {
-                answer = am.getText();
-            }
-        }
-        return answer;
     }
 }

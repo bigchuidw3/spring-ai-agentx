@@ -1,70 +1,99 @@
 # Spring AI AgentX
 
-基于原生 Spring AI 的智能体（Agent）开发框架，提供 ReAct 执行引擎、分层记忆、工具调度、Human-in-the-Loop 等核心能力，形成完整的 Harness Engineering 方案，帮助开发者快速构建 AI Agent，可以快速搭建 Java 版的 Claude Code。
+基于原生 Spring AI 的智能体（Agent）开发框架，提供 ReAct 执行引擎、当前会话记忆、长期记忆、上下文压缩、工具调度、Human-in-the-Loop 等核心能力，帮助开发者快速构建可落地的 Java Agent。
 
-> 当前版本：1.0.0-M2 | JDK 21+ | Spring Boot 3.5.x | Spring AI 1.1.0
+> 当前发布版本：1.0.1
+>
+> 历史版本：1.0.0-M2
+>
+> JDK 21+ | Spring Boot 3.5.x | Spring AI 1.1.0
 
 ## Spring AI AgentX 是什么
 
-![img.png](img.png)
-
-Spring AI AgentX 是一款面向 Java 开发者的 AI Agent 开发框架。基于 **Spring AI** 和 **Reactor** 构建，专注于 Agent 执行引擎，不引入 Graph 编排范式，以简洁的方式帮助开发者构建 AI Agent。
+Spring AI AgentX 是一款面向 Java 开发者的 AI Agent 开发框架。框架基于 Spring AI 与 Reactor 构建，专注 Agent 执行引擎本身，不引入额外的 Graph 编排范式，尽量复用 Spring AI 原生能力完成多轮推理、工具调用、会话持久化与执行控制。
 
 ### 设计理念
 
-**不造轮子，只做 Agent 引擎。** 框架基于 Spring AI 原生机制（ChatClient、ToolCallback、ChatMemory）构建，不引入额外的抽象层。开发者无需学习新的编程范式，只要会用 Spring AI，就会用 AgentX。
+- 不造新范式，只做 Agent 引擎
+- 不用 Graph，基于 Reactor 驱动多轮执行
+- 把模型之外的能力统一收口到 Harness：工具调度、当前会话状态、上下文压缩、HITL、追踪审计、技能体系
 
-**不用 Graph，基于 Reactor 实现。** 不引入 LangGraph 等 Graph 编排框架复杂的节点和边定义，执行引擎基于 Reactor 构建，以声明式的响应式流驱动 Agent 的多轮推理与工具调用。从流式输出到工具执行全链路响应式，天然适配 WebFlux 等异步场景。
+## 当前能力总览
 
-**Harness Engineering。** 借鉴 Claude Code 的架构理念，大模型是引擎，框架是底盘（Harness）。框架不限定模型选择，但模型以外的一切 —— 工具调度、分层记忆、执行控制、Human-in-the-Loop、上下文管理、技能体系 —— 全部由框架统一提供，让开发者只需关注业务逻辑和模型选型。
-
-## 写在前面
-
-这个框架源于我近三年在 Agent 产品领域的持续深耕。最初只是出于好奇 —— 不论是 Python 的 LangChain、LangGraph、AutoGen……还是 Java 的 Spring AI、Spring AI Alibaba、AgentScope，就想搞清楚这些框架底层到底在做什么，不只是知其然，更想知其所以然。
-
-后来在公司主导 Agent 产品开发的过程中，踩了不少坑，也遇到了开源框架的一些局限性。与其在各种框架之间反复适配修补，不如把积累的经验沉淀成一套自己的框架。AgentX 的每个功能模块都源自真实业务场景，是反复打磨的成果。框架完全基于原生 Spring AI，只用基础能力来实现 Agent 的各种功能。
-
-最初的代码根基，也就是 ReAct 主循环，完全是我手搓实现。随着 vibe coding 的发展、大模型能力的增强，现在框架中大部分代码在我的架构设计和思路引导下由 AI 辅助完成，但每个模块的设计决策、技术选型和边界把控，都来自实战中的思考。
-
-希望这个框架能让大家对 Agent 开发有更深层次的理解。
-
-## 功能概览
-
-### v1.0.0-M2（当前版本）
-
-| 功能 | 说明 |
+| 能力 | 说明 |
 |------|------|
-| TodoWrite 任务追踪 | 结构化任务列表工具，流式 TodoProgress 进度事件，保证多步骤任务不遗漏 |
-| TraceAudit 追踪审计 | 基于 `agentx_trace` 表记录每轮 LLM 调用请求/响应/Token，提供大模型调用链路审计和问题追溯 |
-| SubAgent 子代理 | 主 Agent 委派任务给专门的子 Agent，独立 context window，流式事件转发，自动 trace 审计 |
-| 中断与恢复 | 统一 HITL/Interrupt 两种暂停机制，流式/非流式双模式，PauseState 快照持久化到 `agentx_pause_state` 表，跨进程恢复 |
+| ReAct Agent 引擎 | 基于 Reasoning + Acting 驱动多轮执行闭环，统一处理 LLM 调用、工具调用与终态收敛 |
+| 当前会话记忆 | `agentx_conversation` 记录每次调用边界；`agentx_session` 按 `original_messages`、`working_messages`、`offload_context` 三种状态键维护会话状态 |
+| 长期记忆 | 从 `original_messages` 异步抽取跨会话知识，写入外部 VectorStore；每次调用前按 `userId` 语义检索注入 system prompt |
+| 上下文压缩 | 参考 AgentScope 的 6 层渐进式压缩思路，并在其之上做了优化（详见下文与 [11-上下文压缩](docs/core/v1_1/11-上下文压缩.md)） |
+| 结构化输出 | `RunnableParams.outputType(...)` 按单次调用启用 JSON 输出，不影响同一会话中的普通对话 |
+| Human-in-the-Loop | `askUser(true)` 默认注册内置 `ask_user` 工具与对应暂停拦截；支持审批类工具与输入类工具两种语义 |
+| 中断与恢复 | `agentx_pause_state` 持久化暂停快照，统一支持 `HITL_TOOL_REQUEST` 与 `USER_INTERRUPT` 两种暂停原因 |
+| SubAgent 子代理 | 子代理以 `call_{name}` 工具形式委派，拥有独立 context window；父 Agent 是 session 持久化边界 |
+| TraceAudit 追踪审计 | `agentx_trace` 记录每轮 LLM 请求、响应、思考内容与 token 消耗 |
+| TodoWrite 任务追踪 | 结构化任务列表工具，支持流式 TodoProgress 事件 |
+| Skills 技能体系 | 按需加载技能内容，减少大段提示词常驻上下文 |
 
-### v1.0.0-M1
+## v1.0.1 相对 v1.0.0-M2 做了哪些调整
 
-| 功能 | 说明 |
-|------|------|
-| ReAct Agent 引擎 | 基于 Reasoning + Acting 范式构建多轮执行闭环，自动驱动模型推理与工具调用 |
-| 同步与流式输出 | 同步调用（call）与流式输出（stream）两种模式，流式基于 Reactor Flux 实现 |
-| 统一工具调度 | 原生支持 Function Calling / MCP，工具执行由框架统一接管 |
-| 运行时参数注入 | 通过 RunnableParams 动态覆盖工具参数，精准控制工具行为 |
-| 任务管理与执行控制 | 会话级并发控制与中断机制，保障同一会话执行的有序性与可控性 |
-| 分层记忆体系 | 短期记忆、会话摘要、全局知识三层结构，多粒度上下文管理 |
-| 分阶段输出 | StageOutputProvider SPI，在 Agent 生命周期钩子点注入自定义输出 |
-| Human-in-the-Loop | 暂停/恢复机制，支持输入工具与操作工具，支持自定义用户输入工具 |
-| 内置工具能力集 | Bash、文件系统、文本检索（Grep）、Python 等通用工具 |
-| Skills 技能体系 | 基于渐进式披露机制，按需加载技能内容，支持多技能注册与组合 |
-| 思考模型适配 | 新增 `ThinkingMode` 枚举统一 `THINK_TAG` / `REASONING_CONTENT` / `DISABLED` 三种模式，支持 DeepSeek、Qwen3.6-plus 等模型的 `reasoning_content` 字段解析 |
-| DeepSeek-V4 兼容 | 内置 `DeepSeekV4ChatModel`，解决 Spring AI 原生模块在思考模式 + 工具调用场景下的兼容性问题（[spring-ai#6026](https://github.com/spring-projects/spring-ai/issues/6026)） |
-| 异常处理与重试 | 内置透明重试机制，统一异常处理（AgentException + AgentErrorCode） |
-| 上下文压缩 | 两层自动压缩策略（micro_compact + auto_compact），控制长对话 Token 消耗 |
-| ToolSearch 工具检索 | 工具按需发现，LLM 通过 tool_search 元工具搜索加载 deferred 工具 |
-| 结构化输出 | 非流式调用输出标准 JSON，支持单对象和泛型集合 |
+v1.0.1 重点是把会话存储模型、上下文压缩、HITL、暂停恢复这一层重新对齐到一套自洽的执行模型上。下面是架构级调整项：
+
+| 模块 | v1.0.0-M2 口径                         | v1.0.1 调整 |
+|------|--------------------------------------|-------------|
+| 会话存储模型 | 单一历史表（`messages` 字段）                 | `agentx_session` 按 `original_messages` / `working_messages` / `offload_context` 三态组织；新增 `agentx_conversation` 表，每次调用一行，记录调用边界 |
+| `SystemMessage` 持久化 | 历史里会带 system                         | 统一不进入 `agentx_session`，由运行时重新注入 |
+| 上下文压缩 | 两层自动压缩（micro_compact + auto_compact） | 6 层渐进式压缩策略链 + 外层门禁 + `lastKeep` 保护区 + `context_reload` 工具回溯（详见下文） |
+| HITL | 工具统一按审批工具处理                          | 区分审批类工具（用户确认后才执行）与输入类工具（用户回答即工具结果）；`askUser(true)` 默认注册内置 `ask_user` 工具与输入型拦截 |
+| 暂停恢复 | 单表语义                                 | `agentx_pause_state` 管恢复快照，`agentx_session` 管当前会话状态，两张表分工明确 |
+| 长期记忆 | 跨会话长期记忆                              | VectorStore 由调用方构造；LLM 抽取 → 去重合并 → 跨会话注入 |
+| SubAgent | 子代理行为不显式约束                           | 显式约束：禁止嵌套 SubAgent、禁止 AskUser、禁止 PauseAdvisor；父 Agent 才是 session 持久化边界 |
+
+详细差异说明见 [docs/core/v1_1](docs/core/v1_1) 下的专题文档。
+
+## 关于上下文压缩相对 AgentScope 的优化
+
+AgentScope（ASJ）本身就提供了 6 层渐进式上下文压缩思路，框架在这套思路之上做了几点关键优化。这里只做简要说明，详细差异请看 [11-上下文压缩](docs/core/v1_1/11-上下文压缩.md)。
+
+### 1. L1 抛弃 LLM 调用，改为规则替换
+
+AgentScope 的 L1（历史工具调用压缩）即使命中也要调一次 LLM 生成摘要，对于“连续工具消息”这种结构化极强的内容，开销和延迟都不划算。
+
+v1.0.1 的 L1 改为：
+
+- 用字符串模板把连续工具消息替换成结构化清单
+- 原文按段整体 offload，保留 uuid 链路
+- 完全不调 LLM，毫秒级完成
+
+### 2. LLM 调用边界重新归类
+
+把 6 层策略按是否调 LLM 重新归类，调用方一眼能看清开销：
+
+| 层级 | 是否调 LLM | 处理区 |
+|------|------------|--------|
+| L1 历史工具调用列表 | 否 | 历史区 |
+| L2 历史大消息 offload（保留 `lastKeep`） | 否 | 历史区 |
+| L3 历史大消息 offload（不保留 `lastKeep`） | 否 | 历史区 |
+| L4 历史轮次摘要 | 是 | 历史区 |
+| L5 当前轮大消息摘要 | 是 | 当前任务区 |
+| L6 当前轮整体压缩 | 是 | 当前任务区 |
+
+也就是 **L1-L3 不调 LLM，L4-L6 调 LLM**；**L1-L4 处理历史区，L5-L6 处理当前任务区**。
+
+### 3. 新增 `agentx_conversation` 表，调用边界不再需要自己算
+
+AgentScope 只通过 sessions 持久化，调用方很难直接知道“哪几条 session 属于同一次调用”，得自己根据时间戳或会话状态去拼。
+
+v1.0.1 把调用边界独立成一张 `agentx_conversation` 表：
+
+- 每次 `call` / `stream` 一开局就写一行
+- 终态时把状态、token 用量、最终回答回写到同一行
+- `agentx_session` 只负责会话消息状态
+
+这样调用方查“我这一次调用到底发生了什么”非常直接，不用再做聚合。
 
 ## 快速开始
 
-### 1. 构建安装
-
-当前版本需从源码构建安装到本地 Maven 仓库：
+### 1. 从源码构建
 
 ```bash
 git clone https://github.com/bigchuidw3/spring-ai-agentx.git
@@ -72,32 +101,22 @@ cd spring-ai-agentx
 mvn clean install -DskipTests
 ```
 
-后续会考虑发布到 Maven Central，届时可直接通过坐标引入，无需手动构建。
-
 ### 2. 引入依赖
-
-在项目 `pom.xml` 中引入：
 
 ```xml
 <dependency>
     <groupId>com.agentx.ai</groupId>
     <artifactId>spring-ai-agentx-core</artifactId>
-    <version>1.0.0-M2</version>
+    <version>1.0.1</version>
 </dependency>
 ```
 
-框架基于 Spring AI 1.1.0，core 模块已内置 `spring-ai-starter-model-openai`，无需额外引入。
-
-### 3. 构造 ChatModel
-
-框架本身不绑定特定大模型，任何 Spring AI 支持的 ChatModel 都可以直接传入。
-
-**方式 A：兼容 OpenAI 接口的模型（Qwen / DeepSeek / Moonshot 等）**
+### 3. 构建一个最小可用 Agent
 
 ```java
 ChatModel chatModel = OpenAiChatModel.builder()
         .openAiApi(OpenAiApi.builder()
-                .baseUrl("https://dashscope.aliyuncs.com/compatible-mode/")  // 替换为对应厂商的 base URL
+                .baseUrl("https://dashscope.aliyuncs.com/compatible-mode/")
                 .apiKey("your-api-key")
                 .build())
         .defaultOptions(OpenAiChatOptions.builder()
@@ -105,248 +124,132 @@ ChatModel chatModel = OpenAiChatModel.builder()
                 .temperature(0.7)
                 .build())
         .build();
-```
 
-推荐模型 base URL 参考：
+DataSource dataSource = ...;
+JdbcPauseStateStore stateStore = new JdbcPauseStateStore(dataSource);
 
-| 厂商 | base URL | 推荐模型 | 类型 |
-|------|----------|---------|------|
-| 通义千问 (DashScope) | `https://dashscope.aliyuncs.com/compatible-mode/` | qwen-plus | 普通模型 |
-| 智谱 AI (GLM) | 需引入 `spring-ai-starter-model-zhipuai` | glm-4.7 / glm-5.1 | 普通模型 |
-| DeepSeek | `https://api.deepseek.com/` | deepseek-v4-flash | reasoning_content 模型（需使用框架内置 `DeepSeekV4ChatModel`，详见 [15-DeepSeek-V4兼容](docs/core/15-DeepSeek-V4兼容.md)） |
-| MiniMax | `https://api.minimaxi.com/` | minimax-M2.7 | Think 模型 |
-
-> **模型选择建议**：一般场景推荐 qwen-plus；需要 Agent 展示思考过程时，根据模型类型选择对应的 `ThinkingMode`：
-> - `<think/>` 标签格式（MiniMax 等）→ `thinkingMode(ThinkingMode.THINK_TAG)`
-> - `reasoning_content` 字段格式（DeepSeek、Qwen3.6-plus）→ `thinkingMode(ThinkingMode.REASONING_CONTENT)`
->
-> 详见 [09-思考模型适配](docs/core/09-思考模型适配.md)。
-
-> **关于模型兼容性**：虽然各家模型厂商都声称兼容 OpenAI 接口，但实际在请求参数和响应格式上往往存在差异（如思考模式入参出参的差异、字段校验）。框架会优先适配主流模型（如上表所列），但无法保证当前框架兼容市面上所有模型，希望各位理解。
-
-**方式 B：智谱 AI（GLM 系列，需额外引入 `spring-ai-starter-model-zhipuai`）**
-
-```java
-ChatModel chatModel = new ZhiPuAiChatModel(
-        ZhiPuAiApi.builder().apiKey("your-api-key").build(),
-        ZhiPuAiChatOptions.builder()
-                .model("glm-4.7")
-                .temperature(0.7)
-                .build()
-);
-```
-
-**方式 C：DeepSeek V4 思考模型（必须使用框架内置 `DeepSeekV4ChatModel`）**
-
-```java
-ChatModel chatModel = DeepSeekV4ChatModel.builder()
-        .deepSeekApi(DeepSeekApi.builder()
-                .apiKey("your-api-key")
-                .baseUrl("https://api.deepseek.com")
-                .build())
-        .defaultOptions(DeepSeekChatOptions.builder()
-                .model("deepseek-v4-flash")
-                .temperature(0.4)
-                .build())
-        .build();
-```
-
-> **注意**：DeepSeek V4 等思考模型存在 `reasoning_content` 回传兼容性问题，不能使用 OpenAI 兼容接口或 Spring AI 原生模块。详见 [15-DeepSeek-V4兼容](docs/core/15-DeepSeek-V4兼容.md)。
-
-**方式 D：Spring Boot 自动注入**
-
-```yaml
-# application.yml
-spring:
-  ai:
-    openai:
-      base-url: https://dashscope.aliyuncs.com/compatible-mode/
-      api-key: your-api-key
-      chat:
-        options:
-          model: qwen-plus
-          temperature: 0.7
-```
-
-```java
-@Autowired
-ChatModel chatModel;  // Spring Boot 自动注入，直接传给 Agent
-```
-
-### 4. 最简单的 Agent
-
-3 行代码构建一个可用的智能体：
-
-```java
-ReactAgent agent = ReactAgent.builder()
-        .chatModel(chatModel)
-        .build();
-
-String answer = agent.call("帮我分析一下 Java 和 Go 的优劣势");
-```
-
-流式输出：
-
-```java
-agent.stream("用三句话介绍 Spring AI")
-        .doOnNext(chunk -> System.out.print(chunk))
-        .blockLast();
-```
-
-### 5. 自定义系统提示词
-
-通过 `instructions` 设置 Agent 的角色和行为规则：
-
-```java
-ReactAgent agent = ReactAgent.builder()
-        .chatModel(chatModel)
-        .instructions("""
-                你是一个 Java 架构师助手。
-                遵循以下原则：
-                - 给出可落地的方案，不写空话
-                - 优先使用成熟框架和最佳实践
-                """)
-        .build();
-
-String answer = agent.call("帮我设计一个订单系统的架构");
-```
-### 6. 数据持久化与精细控制
-
-传入 `DataSource` 后，框架自动创建 `agentx_session` 和 `agentx_trace` 表。通过 `enableXXX` 参数可独立控制每一项（均默认为 `true`）：
-
-```java
 ReactAgent agent = ReactAgent.builder()
         .chatModel(chatModel)
         .dataSource(dataSource)
-        .enableSession(true)            // 会话历史（agentx_session），默认 true
-        .enableTrace(true)              // 调用审计（agentx_trace），默认 true
+        .stateStore(stateStore)
+        .contextPolicy(ContextPolicy.defaults())
+        .askUser(true)
+        .maxRounds(10)
         .build();
+
+RunnableParams params = RunnableParams.builder()
+        .conversationId("conv_001")
+        .userId("user_123")
+        .build();
+
+AgentResult result = agent.callForResult("帮我查一下北京天气，并给我一句穿衣建议", params);
 ```
 
-| 参数 | 控制内容 | 关闭场景 |
-|------|----------|----------|
-| `enableSession` | 对话历史保存与加载 | SubAgent 等无状态场景（框架自动关闭） |
-| `enableTrace` | LLM 调用链路审计 | 不需要调用追踪时 |
+### 4. 数据持久化与开关
 
-> **SubAgent 说明**：子 Agent 无需传 DataSource，框架自动注入父 Agent 的 TraceStore（trace 跟随父开关），session 自动关闭。详见 [18-SubAgent子代理](docs/core/18-SubAgent子代理.md)。
+传入 `DataSource` 后，框架会按需初始化会话表和追踪表。常用控制项如下：
 
----
+| 参数 | 控制内容 | 默认值 | 说明 |
+|------|----------|--------|------|
+| `enableSession` | `agentx_session` 当前会话状态 | `true` | SubAgent 场景会被框架自动关闭 |
+| `enableTrace` | `agentx_trace` 审计日志 | `true` | 父 Agent 关闭时，SubAgent 也不再记录 trace |
 
-## 功能文档
+## v1.0.1 文档导航（v1_1）
 
-> 详细的功能说明和使用示例请查看 [docs/core/](docs/core/) 目录下的文档。
+下列专题在 v1.0.1 中做了调整，对应文档放在 [docs/core/v1_1](docs/core/v1_1) 下：
 
-| # | 功能 | 说明 | 文档 |
-|---|------|------|------|
-| 1 | 同步与流式输出 | call/stream 双模式，基础 API 和高级 API | [01-同步与流式输出](docs/core/01-同步与流式输出.md) |
-| 2 | 工具与 MCP | 内置工具、自定义工具、MCP 协议支持 | [02-工具与MCP](docs/core/02-工具与MCP.md) |
-| 3 | 动态会话参数 | RunnableParams、addParam / addToolParam 参数注入 | [03-动态会话参数](docs/core/03-动态会话参数.md) |
-| 4 | 任务管理与并发控制 | 会话级并发控制、外部中断 | [04-任务管理与并发控制](docs/core/04-任务管理与并发控制.md) |
-| 5 | 分层记忆体系 | 短期记忆、会话摘要、全局知识三层架构 | [05-分层记忆体系](docs/core/05-分层记忆体系.md) |
-| 6 | 分阶段输出 | StageOutputProvider SPI，三阶段钩子 | [06-分阶段输出](docs/core/06-分阶段输出.md) |
-| 7 | Human-in-the-Loop | 暂停/恢复机制，用户输入工具与操作审批 | [07-Human-in-the-Loop](docs/core/07-Human-in-the-Loop.md) |
-| 8 | Skills 技能体系 | 渐进式披露，按需加载技能 | [08-Skills技能体系](docs/core/08-Skills技能体系.md) |
-| 9 | 思考模型适配 | 支持 `<think/>` 标签和 `reasoning_content` 两种思考输出格式 | [09-思考模型适配](docs/core/09-思考模型适配.md) |
-| 10 | 异常处理与重试 | 透明重试机制，统一异常处理 | [10-异常处理与重试](docs/core/10-异常处理与重试.md) |
-| 11 | 上下文压缩 | 两层自动压缩策略，控制 Token 消耗 | [11-上下文压缩](docs/core/11-上下文压缩.md) |
-| 12 | ToolSearch 工具检索 | 工具按需发现，keyword + LLM 双模式搜索 | [12-ToolSearch工具检索](docs/core/12-ToolSearch工具检索.md) |
-| 13 | 结构化输出 | 非流式调用输出标准 JSON，支持单对象和泛型集合 | [13-结构化输出](docs/core/13-结构化输出.md) |
-| 14 | 综合示例 | Skills + HITL + 分阶段输出完整示例 | [14-综合示例](docs/core/14-综合示例.md) |
-| 15 | DeepSeek-V4 兼容 | reasoning_content 回传兼容性修复与使用指南 | [15-DeepSeek-V4兼容](docs/core/15-DeepSeek-V4兼容.md) |
-| 16 | TodoWrite 任务追踪 | 结构化任务列表，多步骤任务进度可视化 | [16-TodoWrite任务追踪](docs/core/16-TodoWrite任务追踪.md) |
-| 17 | TraceAudit 追踪审计 | agentx_trace 表记录请求/响应/Token，Complete 事件携带 token 累计 | [17-TraceAudit追踪审计](docs/core/17-TraceAudit追踪审计.md) |
-| 18 | SubAgent 子代理 | 主 Agent 委派任务给子 Agent，独立 context，流式事件转发，SubAgentSource 来源标识 | [18-SubAgent子代理](docs/core/18-SubAgent子代理.md) |
-| 19 | 中断与恢复 | HITL/Interrupt 两种暂停机制，流式/非流式双模式，快照持久化与恢复 | [19-中断与恢复](docs/core/19-中断与恢复.md) |
+| 文档 | 说明 |
+|------|------|
+| [05-分层记忆体系](docs/core/v1_1/05-分层记忆体系.md) | 当前会话记忆三态、长期记忆的抽取/合并/注入链路、`LongTermMemoryConfig` 配置 |
+| [11-上下文压缩](docs/core/v1_1/11-上下文压缩.md) | 6 层策略链、LLM 调用边界、历史区/当前任务区划分、AgentScope 优化点 |
+| [13-结构化输出](docs/core/v1_1/13-结构化输出.md) | `outputType` 的 per-call 语义，以及它与会话持久化的关系 |
+| [18-SubAgent子代理](docs/core/v1_1/18-SubAgent子代理.md) | `call_{name}` 委派模型、父子会话边界和当前限制 |
+| [19-中断与恢复](docs/core/v1_1/19-中断与恢复.md) | PauseState 持久化、HITL/Interrupt 两种暂停语义与恢复规则 |
 
----
+推荐阅读顺序：05 → 11 → 13 → 19 → 18。
 
-## 示例参考（Samples）
+## 其他专题文档（沿用 v1.0.0-M2）
 
-项目提供了完整的示例代码，位于 `spring-ai-agentx-samples` 模块，可直接运行体验各功能。
+下列专题在 v1.0.1 中未做架构级调整，仍然沿用 v1.0.0-M2 的口径，文档放在 [docs/core/v1_M2](docs/core/v1_0_M2) 下：
 
-### 配置
+| # | 功能 | 文档 |
+|---|------|------|
+| 1 | 同步与流式输出 | [01-同步与流式输出](docs/core/v1_0_M2/01-同步与流式输出.md) |
+| 2 | 工具与 MCP | [02-工具与MCP](docs/core/v1_0_M2/02-工具与MCP.md) |
+| 3 | 动态会话参数 | [03-动态会话参数](docs/core/v1_0_M2/03-动态会话参数.md) |
+| 4 | 任务管理与并发控制 | [04-任务管理与并发控制](docs/core/v1_0_M2/04-任务管理与并发控制.md) |
+| 6 | 分阶段输出 | [06-分阶段输出](docs/core/v1_0_M2/06-分阶段输出.md) |
+| 7 | Human-in-the-Loop | [07-Human-in-the-Loop](docs/core/v1_0_M2/07-Human-in-the-Loop.md) |
+| 8 | Skills 技能体系 | [08-Skills技能体系](docs/core/v1_0_M2/08-Skills技能体系.md) |
+| 9 | 思考模型适配 | [09-思考模型适配](docs/core/v1_0_M2/09-思考模型适配.md) |
+| 10 | 异常处理与重试 | [10-异常处理与重试](docs/core/v1_0_M2/10-异常处理与重试.md) |
+| 12 | ToolSearch 工具检索 | [12-ToolSearch工具检索](docs/core/v1_0_M2/12-ToolSearch工具检索.md) |
+| 14 | 综合示例 | [14-综合示例](docs/core/v1_0_M2/14-综合示例.md) |
+| 15 | DeepSeek-V4 兼容 | [15-DeepSeek-V4兼容](docs/core/v1_0_M2/15-DeepSeek-V4兼容.md) |
+| 16 | TodoWrite 任务追踪 | [16-TodoWrite任务追踪](docs/core/v1_0_M2/16-TodoWrite任务追踪.md) |
+| 17 | TraceAudit 追踪审计 | [17-TraceAudit追踪审计](docs/core/v1_0_M2/17-TraceAudit追踪审计.md) |
 
-示例需要真实 API Key 和数据库连接。首次运行前复制配置模板并填入真实值：
+## v1.0.1 示例索引
 
-```bash
-cd spring-ai-agentx-samples/src/main/resources
-cp secrets.properties.example secrets.properties
-# 编辑 secrets.properties，填入真实配置
-```
+`spring-ai-agentx-samples` 模块下 `v1_1` 包下的样例可以直接验证当前行为：
 
-- `secrets.properties.example` — 模板文件（仅占位符），提交到 Git
-- `secrets.properties` — 真实配置，已在 `.gitignore` 中排除，不提交
-
-### 示例列表
-
-| 示例类 | 涵盖功能 | 说明 |
-|--------|---------|------|
-| `RunnableParamsTest` | 运行时参数注入 | addParam / addToolParam 参数覆盖 |
-| `AgentSkillsTest` | Skills 技能体系 | 技能加载与多技能组合 |
-| `TaskManagerTest` | 任务管理与并发控制 | 会话级并发控制与中断 |
-| `RetryErrorTest` | 异常处理与重试 | 重试机制与错误码处理 |
-| `HumanInTheLoopTest` | Human-in-the-Loop | 暂停/恢复、ask_user、操作审批 |
-| `StageOutputTest` | 分阶段输出 | StageOutputProvider、多时机钩子、Think 标签 |
-| `ThinkingModeTest` | 思考模型适配 | REASONING_CONTENT / THINK_TAG / DISABLED 三种模式 |
-| `MemoryTest` | 分层记忆体系 | 短期记忆、会话摘要、全局知识 |
-| `ContextManagementTest` | 上下文压缩 | 默认配置、自定义配置、保护工具 |
-| `FullIntegrationTest` | 完整集成 | 三层记忆 + Skills + 全量工具 |
-| `ToolSearchTest` | ToolSearch 工具检索 | 同步/流式调用、Session 隔离验证 |
-| `StructuredOutputTest` | 结构化输出 | call/callForResult 单对象与集合输出 |
-| `TodoWriteTest` | TodoWrite 任务追踪 | 流式/非流式 TodoProgress 事件，纯 TodoWrite 场景 |
-| `TraceAuditTest` | TraceAudit 追踪审计 | 非流/流式多轮工具调用 + agentx_trace 入库 + Complete 事件 token 累计 |
-| `SubAgentTest` | SubAgent 子代理 | 非流/流式委派，SubAgentSource 事件标识，trace 自动继承 |
-| `InterruptResumeTest` | 中断与恢复 | 流式/非流式 Interrupt、HITL 暂停恢复、Interrupt+HITL 共存、元数据检查 |
-
-> 各示例内部通过 `testNumber` 切换测试场景，修改后直接运行 `main` 方法即可。
-
----
-
-## 版本发布
-
-| 版本 | 状态 | 说明 |
-|------|------|------|
-| [v1.0.0-M2](#v100-m2当前版本) | 当前版本 | TodoWrite 任务追踪，结构化任务列表工具与流式进度事件 |
-| [v1.0.0-M1](#v100-m1) | 历史版本 | 首个里程碑版本，ReAct 引擎 + 分层记忆 + 工具调度 + 思考模型适配 + DeepSeek-V4 兼容等核心能力 |
+| 示例类 | 主要验证点 |
+|--------|------------|
+| `ToolCallSessionTest` | 工具调用后 `agentx_conversation` / `agentx_session` 的基础落库行为 |
+| `MemoryTest` | 当前会话记忆不跨会话；长期记忆跨会话抽取、注入 |
+| `MultiTurnConversationTest` | 同一 `conversationId` 跨多轮复用会话状态 |
+| `CompressionLayerTest` | 6 层压缩策略、`working_messages` 覆盖写与 `offload_context` 留痕 |
+| `StructuredOutputSessionTest` | 同一会话中先普通回答、再切换结构化输出 |
+| `InterruptResumeSessionTest` | `USER_INTERRUPT` / `HITL_TOOL_REQUEST` 暂停恢复与会话落库 |
+| `SubAgentSessionTest` | SubAgent 流式委派时，只有父 Agent 写 `agentx_session` |
 
 ## 版本路线图
 
-### v1.0.0-M1
+### v1.0.1（当前发布版本）
 
-- [x] ReAct Agent 引擎 — 基于 Reasoning + Acting 范式的多轮执行闭环
-- [x] 同步调用与流式输出 — call / stream 双模式，流式基于 Reactor Flux
-- [x] 统一工具调度 — 原生支持 Function Calling / MCP，框架统一接管执行
-- [x] 运行时参数注入 — RunnableParams 动态覆盖工具参数
-- [x] 任务管理与执行控制 — 会话级并发控制与中断机制
-- [x] 分层记忆体系 — 短期记忆、会话摘要、全局知识（RAG）
-- [x] Human-in-the-Loop — Agent 主动提问与操作审批，暂停/恢复执行
-- [x] 阶段式输出 — StageOutputProvider SPI，三种钩子时机
-- [x] 内置工具能力集 — Bash、文件系统、Grep、Python
-- [x] Skills 技能体系 — 渐进式披露，按需加载
-- [x] 思考模型适配 — `ThinkingMode` 枚举统一 THINK_TAG / REASONING_CONTENT / DISABLED 三种模式
-- [x] DeepSeek-V4 兼容 — 内置 `DeepSeekV4ChatModel`，解决思考模式 + 工具调用兼容性问题
-- [x] 异常处理与重试 — 内置透明重试机制，AgentException + AgentErrorCode
-- [x] 上下文压缩 — 两层自动压缩策略，控制 Token 消耗
-- [x] ToolSearch 工具检索 — 工具按需发现，keyword + LLM 双模式搜索
-- [x] 结构化输出 — 非流式调用输出标准 JSON，支持单对象和泛型集合
+- 当前会话记忆三态模型（`original_messages` / `working_messages` / `offload_context`）
+- 新增 `agentx_conversation` 表，独立记录调用边界
+- 6 层渐进式上下文压缩 + `context_reload` 回溯
+- HITL 语义统一（审批类工具 / 输入类工具）
+- 暂停恢复双表分工（`agentx_pause_state` + `agentx_session`）
+- SubAgent 约束与父 Agent 会话边界明确
+- 长期记忆：VectorStore 驱动，从 `original_messages` 异步抽取 → 去重合并 → 跨会话注入
 
-### v1.0.0-M2（当前版本）
+### v1.0.0-M2（历史版本）
 
-- [x] TodoWrite 任务追踪 — 结构化任务列表工具，流式 TodoProgress 进度事件
-- [x] TraceAudit 追踪审计 — `agentx_trace` 表记录每轮 LLM 调用请求/响应/Token，Complete 事件携带 token 累计，支持大模型调用链路审计
-- [x] SubAgent 子代理 — 主 Agent 委派任务给专门的子 Agent，独立 context window，流式事件转发（SubAgentSource 来源标识），自动继承父 Agent trace 审计，框架自动禁用 session
-- [x] 中断与恢复 — 统一 HITL/Interrupt 两种暂停机制，call/stream 双模式，`PauseState` 快照持久化到 `agentx_pause_state` 表，跨进程断点续执
+- TodoWrite 任务追踪
+- TraceAudit 追踪审计
+- SubAgent 子代理
+- 中断与恢复
+
+### v1.0.0-M1（历史版本）
+
+- ReAct Agent 引擎
+- 同步调用与流式输出
+- 统一工具调度
+- 运行时参数注入
+- 任务管理与执行控制
+- 分层记忆体系
+- Human-in-the-Loop
+- 分阶段输出
+- 内置工具能力集
+- Skills 技能体系
+- 思考模型适配
+- DeepSeek-V4 兼容
+- 异常处理与重试
+- 上下文压缩（两层）
+- ToolSearch 工具检索
+- 结构化输出
 
 ### v1.0.0-M3（规划中）
 
-- [ ] 执行沙箱 — 为工具调用与代码执行提供隔离运行环境
-- [ ] Plan & Execute 架构 — 在 ReAct 基础上引入显式规划阶段
-- [ ] Agent Teams — 多 Agent 按角色协同
+- 执行沙箱
+- Plan & Execute 架构
+- Agent Teams
 
 ### v1.0.0-GA（远期规划）
 
-- [ ] 可观测性体系 — 全链路追踪，支持接入 Langfuse 等观测系统
-- [ ] 外部记忆系统对接 — 支持 mem0 等外部长期记忆系统
+- 可观测性体系
 
 ## License
 

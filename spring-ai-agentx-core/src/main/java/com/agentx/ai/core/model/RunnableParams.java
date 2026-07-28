@@ -13,8 +13,8 @@ import java.util.Objects;
  *
  * 用于传递执行时的额外参数，支持会话管理、长期记忆、上下文注入和工具参数替换。
  *
- * conversationId 用于 ChatMemory 会话管理和流式停止。
- * userId 用于长期记忆（MemoryStore）的用户维度标识，跨会话持久。
+ * conversationId 用于 SessionMessageStore 会话管理与流式停止。
+ * userId 用于长期记忆的用户维度标识，跨会话持久。
  *
  * customParams 和 toolParams 分别面向不同对象：
  * - addParam("language", "zh-CN")：将参数注入系统提示词，LLM 可见并可直接使用。

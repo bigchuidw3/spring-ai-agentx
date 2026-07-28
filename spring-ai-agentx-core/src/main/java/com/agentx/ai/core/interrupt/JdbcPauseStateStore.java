@@ -28,7 +28,7 @@ import java.util.Map;
  * 基于 JDBC 的 {@link PauseStateStore} 实现，将完整 {@link PauseState} 持久化到
  * {@code agentx_pause_state} 表。
  *
- * <p>与框架其他 DataSource 驱动组件（{@code TraceStore}、{@code AgentChatMemory}）
+ * <p>与框架其他 DataSource 驱动组件（{@code TraceStore}、{@code SessionMessageStore}）
  * 共享同一数据源，天然支持多节点跨进程恢复。通过
  * {@link DataSourceStorageFactory#createPauseStateStore(javax.sql.DataSource)} 自动建表并返回实例。
  *

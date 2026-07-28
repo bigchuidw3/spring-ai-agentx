@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import javax.sql.DataSource;
@@ -142,10 +143,15 @@ public class SessionMessageStore {
     /**
      * 批量追加消息。item_index 从当前最大值 +1 起递增。
      * 终态时调用：一次调用新增的消息一次性写入，避免 ReAct 循环中频繁 DB I/O。
+     * system 消息属于运行时外部上下文，不进入 agentx_session。
      */
     public void appendMessages(String conversationId, long sessionId,
                                String stateKey, List<Message> messages) {
         if (conversationId == null || stateKey == null || messages == null || messages.isEmpty()) {
+            return;
+        }
+        List<Message> persistedMessages = filterPersistableMessages(messages);
+        if (persistedMessages.isEmpty()) {
             return;
         }
         ensureInitialized();
@@ -154,16 +160,16 @@ public class SessionMessageStore {
         int startIndex = (maxIndex == null ? -1 : maxIndex) + 1;
 
         String sessionIdStr = String.valueOf(sessionId);
-        List<Object[]> batchArgs = new ArrayList<>(messages.size());
-        for (int i = 0; i < messages.size(); i++) {
-            String data = MessageJsonSerializer.toJson(List.of(messages.get(i)));
+        List<Object[]> batchArgs = new ArrayList<>(persistedMessages.size());
+        for (int i = 0; i < persistedMessages.size(); i++) {
+            String data = MessageJsonSerializer.toJson(List.of(persistedMessages.get(i)));
             batchArgs.add(new Object[]{
                     IdWorker.getId(), conversationId, sessionIdStr, stateKey, startIndex + i, data
             });
         }
         jdbcTemplate.batchUpdate(INSERT_SQL, batchArgs);
         log.debug("Appended {} messages: conversationId={}, sessionId={}, stateKey={}, startIndex={}",
-                messages.size(), conversationId, sessionId, stateKey, startIndex);
+                persistedMessages.size(), conversationId, sessionId, stateKey, startIndex);
     }
 
     /**
@@ -175,11 +181,12 @@ public class SessionMessageStore {
         if (conversationId == null || stateKey == null) {
             return;
         }
+        List<Message> persistedMessages = filterPersistableMessages(messages);
         ensureInitialized();
         jdbcTemplate.update(DELETE_BY_CONV_KEY_SQL, conversationId, stateKey);
-        appendMessages(conversationId, sessionId, stateKey, messages);
+        appendMessages(conversationId, sessionId, stateKey, persistedMessages);
         log.debug("Replaced state: conversationId={}, stateKey={}, rows={}",
-                conversationId, stateKey, messages != null ? messages.size() : 0);
+                conversationId, stateKey, persistedMessages.size());
     }
 
     /**
@@ -248,6 +255,19 @@ public class SessionMessageStore {
         List<String> jsonList = jdbcTemplate.queryForList(
                 SELECT_OFFLOAD_BY_UUID_SQL, String.class, pattern);
         return findUuidInRows(jsonList, uuid);
+    }
+
+    private List<Message> filterPersistableMessages(List<Message> messages) {
+        if (messages == null || messages.isEmpty()) {
+            return List.of();
+        }
+        List<Message> persisted = new ArrayList<>(messages.size());
+        for (Message message : messages) {
+            if (!(message instanceof SystemMessage)) {
+                persisted.add(message);
+            }
+        }
+        return persisted;
     }
 
     private List<Message> findUuidInRows(List<String> jsonList, String uuid) {
