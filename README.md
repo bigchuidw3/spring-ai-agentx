@@ -23,16 +23,23 @@ Spring AI AgentX 是一款面向 Java 开发者的 AI Agent 开发框架。框�
 | 能力 | 说明 |
 |------|------|
 | ReAct Agent 引擎 | 基于 Reasoning + Acting 驱动多轮执行闭环，统一处理 LLM 调用、工具调用与终态收敛 |
+| 同步与流式输出 | `call` / `stream` 双模式，流式基于 Reactor Flux，支持流式中途停止 |
 | 当前会话记忆 | `agentx_conversation` 记录每次调用边界；`agentx_session` 按 `original_messages`、`working_messages`、`offload_context` 三种状态键维护会话状态 |
 | 长期记忆 | 从 `original_messages` 异步抽取跨会话知识，写入外部 VectorStore；每次调用前按 `userId` 语义检索注入 system prompt |
 | 上下文压缩 | 参考 AgentScope 的 6 层渐进式压缩思路，并在其之上做了优化（详见下文与 [11-上下文压缩](docs/core/v1_1/11-上下文压缩.md)） |
 | 结构化输出 | `RunnableParams.outputType(...)` 按单次调用启用 JSON 输出，不影响同一会话中的普通对话 |
+| 工具调度与 MCP | 原生 Function Calling + MCP 协议，工具执行由框架统一接管；支持 ToolSearch 按需发现 |
+| 运行时参数注入 | `RunnableParams` 动态覆盖工具参数，精准控制工具行为 |
+| 任务管理与并发控制 | 会话级并发控制与中断机制，保障同一会话执行的有序性与可控性 |
 | Human-in-the-Loop | `askUser(true)` 默认注册内置 `ask_user` 工具与对应暂停拦截；支持审批类工具与输入类工具两种语义 |
 | 中断与恢复 | `agentx_pause_state` 持久化暂停快照，统一支持 `HITL_TOOL_REQUEST` 与 `USER_INTERRUPT` 两种暂停原因 |
 | SubAgent 子代理 | 子代理以 `call_{name}` 工具形式委派，拥有独立 context window；父 Agent 是 session 持久化边界 |
 | TraceAudit 追踪审计 | `agentx_trace` 记录每轮 LLM 请求、响应、思考内容与 token 消耗 |
 | TodoWrite 任务追踪 | 结构化任务列表工具，支持流式 TodoProgress 事件 |
 | Skills 技能体系 | 按需加载技能内容，减少大段提示词常驻上下文 |
+| 思考模型适配 | 支持 `<think/>` 标签和 `reasoning_content` 两种思考输出格式，内置 `DeepSeekV4ChatModel` 兼容修复 |
+| 异常处理与重试 | 内置透明重试机制，统一异常处理（AgentException + AgentErrorCode） |
+| 分阶段输出 | StageOutputProvider SPI，在 Agent 生命周期钩子点注入自定义输出 |
 
 ## v1.0.1 相对 v1.0.0-M2 做了哪些调整
 
@@ -241,14 +248,11 @@ AgentResult result = agent.callForResult("帮我查一下北京天气，并给�
 - ToolSearch 工具检索
 - 结构化输出
 
-### v1.0.0-M3（规划中）
+### 规划中
 
 - 执行沙箱
 - Plan & Execute 架构
 - Agent Teams
-
-### v1.0.0-GA（远期规划）
-
 - 可观测性体系
 
 ## License
