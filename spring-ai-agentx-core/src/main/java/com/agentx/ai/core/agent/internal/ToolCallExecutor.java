@@ -1,11 +1,12 @@
 package com.agentx.ai.core.agent.internal;
 
+import com.agentx.ai.core.hook.HookManager;
+import com.agentx.ai.core.hook.AfterToolExecutionEvent;
+import com.agentx.ai.core.hook.BeforeToolExecutionEvent;
 import com.agentx.ai.core.model.AgentStreamEvent;
 import com.agentx.ai.core.model.PendingToolCall;
 import com.agentx.ai.core.model.RunnableParams;
 import com.agentx.ai.core.stage.AgentRuntimeContext;
-import com.agentx.ai.core.stage.StageOutputManager;
-import com.agentx.ai.core.tools.TodoWriteTool;
 import com.alibaba.fastjson2.JSON;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -50,32 +51,34 @@ public class ToolCallExecutor {
     private final Map<String, ToolCallback> toolMap;
     private final ObjectMapper objectMapper;
     private final String askUserToolName;
-    private final StageOutputManager stageManager;
+    private final HookManager hookManager;
 
     public ToolCallExecutor(Map<String, ToolCallback> toolMap, ObjectMapper objectMapper,
-                            String askUserToolName, StageOutputManager stageManager) {
+                            String askUserToolName, HookManager hookManager) {
         this.toolMap = toolMap;
         this.objectMapper = objectMapper;
         this.askUserToolName = askUserToolName;
-        this.stageManager = stageManager;
+        this.hookManager = hookManager;
     }
 
     /**
-     * 执行单个工具调用（非流式路径，sink 为 null）。
+     * 执行单个工具调用（非流式路径，sink 和 runtimeCtx 为 null）。
      */
     public ToolExecutionResult executeSingleTool(AssistantMessage.ToolCall toolCall, RunnableParams params) {
-        return executeSingleTool(toolCall, params, null);
+        return executeSingleTool(toolCall, params, null, null);
     }
 
     /**
      * 执行单个工具调用。
      *
-     * @param toolCall 工具调用信息
-     * @param params   调用参数
-     * @param sink     事件 Sink（流式路径不为 null，非流式路径为 null）
+     * @param toolCall   工具调用信息
+     * @param params     调用参数
+     * @param sink       事件 Sink（流式路径不为 null，非流式路径为 null）
+     * @param runtimeCtx 当前调用的运行时上下文（null 时不触发 Hook）
      */
     public ToolExecutionResult executeSingleTool(AssistantMessage.ToolCall toolCall, RunnableParams params,
-                                                  Sinks.Many<AgentStreamEvent> sink) {
+                                                  Sinks.Many<AgentStreamEvent> sink,
+                                                  AgentRuntimeContext runtimeCtx) {
         String toolName = toolCall.name();
         String argsJson = toolCall.arguments();
 
@@ -98,7 +101,22 @@ public class ToolCallExecutor {
         Object result;
         try {
             ToolContext toolContext = buildToolContext(params, sink);
-            result = callback.call(argsJson, toolContext);
+            String effectiveArgs = argsJson;
+
+            if (runtimeCtx != null && !hookManager.isEmpty()) {
+                BeforeToolExecutionEvent event = new BeforeToolExecutionEvent(
+                        runtimeCtx, toolName, toolCall.id(), argsJson, toolContext);
+                BeforeToolExecutionEvent processed = hookManager.fireEvent(event);
+                effectiveArgs = processed.getArguments();
+                toolContext = processed.getToolContext();
+            }
+
+            // Hook 处理后、工具执行前发射 ToolStart（携带 post-hook 入参，与工具真实执行一致）
+            if (sink != null) {
+                sink.tryEmitNext(new AgentStreamEvent.ToolStart(toolName, toolCall.id(), effectiveArgs));
+            }
+
+            result = callback.call(effectiveArgs, toolContext);
         } catch (Exception e) {
             log.error("Tool '{}' execution failed: {}", toolName, e.getMessage(), e);
             String hint = buildErrorHint(toolName, e);
@@ -124,7 +142,7 @@ public class ToolCallExecutor {
 
         for (AssistantMessage.ToolCall tc : allToolCalls) {
             if (!pendingIds.contains(tc.id())) {
-                ToolExecutionResult result = executeSingleTool(tc, params);
+                ToolExecutionResult result = executeSingleTool(tc, params, null, runtimeCtx);
                 List<Message> collected = collectToolCallMessages(tc, result);
                 messages.addAll(collected);
                 if (runtimeCtx != null) {
@@ -157,7 +175,7 @@ public class ToolCallExecutor {
 
             Schedulers.boundedElastic().schedule(() -> {
                 try {
-                    ToolExecutionResult toolResult = executeSingleTool(tc, params, sink);
+                    ToolExecutionResult toolResult = executeSingleTool(tc, params, sink, runtimeCtx);
                     results.set(index, collectToolCallMessages(tc, toolResult));
                     execDetails.set(index, new ToolExecDetail(tc, toolResult.rawResult(), null));
                 } catch (Exception ex) {
@@ -179,10 +197,15 @@ public class ToolCallExecutor {
                                 sink.tryEmitNext(new AgentStreamEvent.ToolEnd(
                                         detail.toolCall.name(), detail.toolCall.id(), detail.rawResult));
 
-                                emitTodoProgressIfNeeded(detail.toolCall.name(), detail.toolCall.arguments(), sink);
-
-                                if (runtimeCtx != null && !stageManager.isEmpty()) {
-                                    stageManager.afterToolEnd(runtimeCtx.toStageContext(), sink::tryEmitNext);
+                                if (runtimeCtx != null && !hookManager.isEmpty()) {
+                                    hookManager.fireEvent(new AfterToolExecutionEvent(
+                                            runtimeCtx,
+                                            detail.toolCall.name(),
+                                            detail.toolCall.id(),
+                                            detail.toolCall.arguments(),
+                                            detail.rawResult,
+                                            true,
+                                            0));
                                 }
                             }
                         }
@@ -401,19 +424,6 @@ public class ToolCallExecutor {
             return false;
         }
         return APPROVAL_KEYWORDS.contains(userResponse.trim().toLowerCase());
-    }
-
-    private void emitTodoProgressIfNeeded(String toolName, String arguments,
-                                           Sinks.Many<AgentStreamEvent> sink) {
-        if (!"TodoWrite".equals(toolName)) {
-            return;
-        }
-        try {
-            List<TodoWriteTool.TodoItem> items = JSON.parseObject(arguments).getList("todos", TodoWriteTool.TodoItem.class);
-            sink.tryEmitNext(new AgentStreamEvent.TodoProgress(items));
-        } catch (Exception e) {
-            log.warn("解析 TodoWrite 参数失败，跳过 TodoProgress 事件: {}", e.getMessage());
-        }
     }
 
     /**

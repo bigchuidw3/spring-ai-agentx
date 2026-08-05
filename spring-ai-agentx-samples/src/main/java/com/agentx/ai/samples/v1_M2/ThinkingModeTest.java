@@ -7,7 +7,6 @@ import org.springframework.ai.chat.model.ChatModel;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 
 /**
  * ThinkingMode 思考模型适配测试。
@@ -87,10 +86,6 @@ public class ThinkingModeTest {
             if (think != null && !think.isEmpty()) {
                 System.out.println("Think: " + think);
             }
-            Map<String, Object> stageOutputs = c.stageOutputs();
-            if (!stageOutputs.isEmpty()) {
-                System.out.println("StageOutputs: " + stageOutputs);
-            }
         } else if (result instanceof AgentResult.Paused p) {
             System.out.println("Agent 暂停（此场景不应暂停）");
         }
@@ -159,10 +154,6 @@ public class ThinkingModeTest {
             if (think != null && !think.isEmpty()) {
                 System.out.println("Think: " + think);
             }
-            Map<String, Object> stageOutputs = c.stageOutputs();
-            if (!stageOutputs.isEmpty()) {
-                System.out.println("StageOutputs: " + stageOutputs);
-            }
         } else if (result instanceof AgentResult.Paused p) {
             System.out.println("Agent 暂停（此场景不应暂停）");
         }
@@ -173,10 +164,8 @@ public class ThinkingModeTest {
     private static void printStats(List<AgentStreamEvent> events) {
         long thinkingCount = events.stream().filter(e -> e instanceof AgentStreamEvent.Thinking).count();
         long textCount = events.stream().filter(e -> e instanceof AgentStreamEvent.Text).count();
-        long stageOutputCount = events.stream().filter(e -> e instanceof AgentStreamEvent.StageOutput).count();
         System.out.println("\nThinking events: " + thinkingCount);
         System.out.println("Text events: " + textCount);
-        System.out.println("StageOutput events: " + stageOutputCount);
     }
 
     // ===== Main =====

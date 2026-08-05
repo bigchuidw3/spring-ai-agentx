@@ -1,13 +1,9 @@
 package com.agentx.ai.core.model;
 
 import com.agentx.ai.core.exception.AgentErrorCode;
-import com.agentx.ai.core.interrupt.PauseReason;
-import com.agentx.ai.core.tools.TodoWriteTool.TodoItem;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
-
-import java.util.List;
 
 /**
  * Agent 流式事件。
@@ -20,15 +16,11 @@ import java.util.List;
  *
  * 可扩展的 sealed 接口，支持以下事件类型：
  * <ul>
- *   <li>{@link AgentStart} - Agent 开始执行</li>
  *   <li>{@link Thinking} - LLM 思考过程（think 标签内）</li>
  *   <li>{@link Text} - LLM 正常文本输出</li>
  *   <li>{@link ToolStart} - 工具即将执行</li>
  *   <li>{@link ToolEnd} - 工具执行完成</li>
- *   <li>{@link TodoProgress} - 任务列表进度更新（TodoWrite 工具触发）</li>
  *   <li>{@link Paused} - 执行暂停，等待外部输入（含 HITL 与 USER_INTERRUPT 两种原因）</li>
- *   <li>{@link ResumeStart} - 从中断状态恢复执行开始（携带原 conversationId、暂停轮次、暂停时间）</li>
- *   <li>{@link StageOutput} - 自定义阶段输出（由 {@link StageOutputProvider} 产生）</li>
  *   <li>{@link Error} - LLM 调用异常（重试时发出）</li>
  *   <li>{@link Complete} - Agent 执行完成</li>
  * </ul>
@@ -39,37 +31,22 @@ import java.util.List;
 @JsonInclude(JsonInclude.Include.NON_NULL)
 @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.PROPERTY, property = "type")
 @JsonSubTypes({
-    @JsonSubTypes.Type(value = AgentStreamEvent.AgentStart.class, name = "AgentStart"),
     @JsonSubTypes.Type(value = AgentStreamEvent.Thinking.class, name = "Thinking"),
     @JsonSubTypes.Type(value = AgentStreamEvent.Text.class, name = "Text"),
     @JsonSubTypes.Type(value = AgentStreamEvent.ToolStart.class, name = "ToolStart"),
     @JsonSubTypes.Type(value = AgentStreamEvent.ToolEnd.class, name = "ToolEnd"),
-    @JsonSubTypes.Type(value = AgentStreamEvent.TodoProgress.class, name = "TodoProgress"),
     @JsonSubTypes.Type(value = AgentStreamEvent.Paused.class, name = "Paused"),
-    @JsonSubTypes.Type(value = AgentStreamEvent.ResumeStart.class, name = "ResumeStart"),
-    @JsonSubTypes.Type(value = AgentStreamEvent.StageOutput.class, name = "StageOutput"),
     @JsonSubTypes.Type(value = AgentStreamEvent.Error.class, name = "Error"),
     @JsonSubTypes.Type(value = AgentStreamEvent.Complete.class, name = "Complete")
 })
 public sealed interface AgentStreamEvent permits
-        AgentStreamEvent.AgentStart,
         AgentStreamEvent.Thinking,
         AgentStreamEvent.Text,
         AgentStreamEvent.ToolStart,
         AgentStreamEvent.ToolEnd,
-        AgentStreamEvent.TodoProgress,
         AgentStreamEvent.Paused,
-        AgentStreamEvent.ResumeStart,
-        AgentStreamEvent.StageOutput,
         AgentStreamEvent.Error,
         AgentStreamEvent.Complete {
-
-    /**
-     * Agent 开始执行。
-     */
-    record AgentStart(SubAgentSource source) implements AgentStreamEvent {
-        public AgentStart() { this(null); }
-    }
 
     /**
      * LLM 思考过程（&lt;think/&gt; 标签内的内容）。
@@ -116,19 +93,6 @@ public sealed interface AgentStreamEvent permits
     }
 
     /**
-     * 任务列表进度更新（TodoWrite 工具触发）。
-     * <p>
-     * 每次 LLM 调用 TodoWrite 更新任务列表时，框架自动发射此事件。
-     * 前端可据此实时渲染任务进度面板。
-     *
-     * @param items  当前所有任务项
-     * @param source 事件来源（null 表示主 Agent）
-     */
-    record TodoProgress(List<TodoItem> items, SubAgentSource source) implements AgentStreamEvent {
-        public TodoProgress(List<TodoItem> items) { this(items, null); }
-    }
-
-    /**
      * 执行暂停事件，等待外部输入。
      *
      * <p>暂停原因（HITL 工具请求 / 用户主动中断）通过 {@link PauseState#getReason()} 区分，
@@ -139,41 +103,6 @@ public sealed interface AgentStreamEvent permits
      */
     record Paused(PauseState state, SubAgentSource source) implements AgentStreamEvent {
         public Paused(PauseState state) { this(state, null); }
-    }
-
-    /**
-     * 从中断状态恢复执行开始事件。
-     *
-     * <p>恢复流的首个事件，前端据此感知"这是恢复执行"而非新会话。
-     *
-     * @param conversationId 原会话 ID（保持不变）
-     * @param pausedRound    中断时的轮次
-     * @param pausedAt       中断时间戳（epoch millis，0 表示未知）
-     * @param reason         暂停原因
-     * @param source         事件来源（null 表示主 Agent）
-     */
-    record ResumeStart(
-            String conversationId,
-            int pausedRound,
-            long pausedAt,
-            PauseReason reason,
-            SubAgentSource source
-    ) implements AgentStreamEvent {
-        public ResumeStart(String conversationId, int pausedRound, long pausedAt,
-                           PauseReason reason) {
-            this(conversationId, pausedRound, pausedAt, reason, null);
-        }
-    }
-
-    /**
-     * 自定义阶段输出（由 {@link StageOutputProvider} 产生）。
-     *
-     * @param stage  阶段名称（如 "reference"、"recommend"）
-     * @param data   阶段输出数据
-     * @param source 事件来源（null 表示主 Agent）
-     */
-    record StageOutput(String stage, Object data, SubAgentSource source) implements AgentStreamEvent {
-        public StageOutput(String stage, Object data) { this(stage, data, null); }
     }
 
     /**

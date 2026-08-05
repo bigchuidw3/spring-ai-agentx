@@ -1,11 +1,12 @@
 package com.agentx.ai.core.stage;
 
+import com.agentx.ai.core.model.AgentStreamEvent;
 import com.agentx.ai.core.model.RunnableParams;
-import com.agentx.ai.core.model.StageContext;
 import com.agentx.ai.core.trace.TraceManager;
 import org.springframework.ai.chat.messages.Message;
 
 import java.util.List;
+import java.util.function.Consumer;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -39,6 +40,16 @@ public class AgentRuntimeContext {
      */
     private final AtomicBoolean persistedFlag = new AtomicBoolean(false);
 
+    /**
+     * ReAct 循环的工作消息列表（可变，供 Hook 读取/修改）。
+     */
+    private List<Message> messages;
+
+    /**
+     * 下游事件发射器，Hook 可通过它注入 AgentStreamEvent。
+     */
+    private Consumer<AgentStreamEvent> emitter;
+
     public AgentRuntimeContext(String query, RunnableParams params) {
         this.query = query;
         this.params = params;
@@ -52,12 +63,16 @@ public class AgentRuntimeContext {
         return params;
     }
 
-    /** 便捷方法：从 params 派生 conversationId。 */
+    /**
+     * 便捷方法：从 params 派生 conversationId。
+     */
     public String getConversationId() {
         return params != null ? params.getConversationId() : null;
     }
 
-    /** 便捷方法：从 params 派生 userId。 */
+    /**
+     * 便捷方法：从 params 派生 userId。
+     */
     public String getUserId() {
         return params != null ? params.getUserId() : null;
     }
@@ -70,7 +85,9 @@ public class AgentRuntimeContext {
         this.sessionId = sessionId;
     }
 
-    /** 本次调用新增消息在 messages 列表中的起点，终态落库时据此切片。 */
+    /**
+     * 本次调用新增消息在 messages 列表中的起点，终态落库时据此切片。
+     */
     public int getNewMsgStartIndex() {
         return newMsgStartIndex;
     }
@@ -101,7 +118,9 @@ public class AgentRuntimeContext {
         originalMessagesSnapshot.addAll(messages);
     }
 
-    /** CAS 标记终态：completed / interrupted / error。只允许设置一次。 */
+    /**
+     * CAS 标记终态：completed / interrupted / error。只允许设置一次。
+     */
     public boolean markTerminal(String status) {
         return terminalStatus.compareAndSet(null, status);
     }
@@ -126,13 +145,17 @@ public class AgentRuntimeContext {
         this.traceManager = traceManager;
     }
 
-    /** 累加本轮 token 用量。 */
+    /**
+     * 累加本轮 token 用量。
+     */
     public void accumulateTokens(long promptTokens, long completionTokens) {
         if (promptTokens > 0) this.totalPromptTokens.addAndGet(promptTokens);
         if (completionTokens > 0) this.totalCompletionTokens.addAndGet(completionTokens);
     }
 
-    /** 从暂停恢复时还原累计 token。 */
+    /**
+     * 从暂停恢复时还原累计 token。
+     */
     public void restoreTokens(long savedPrompt, long savedCompletion) {
         this.totalPromptTokens.set(savedPrompt);
         this.totalCompletionTokens.set(savedCompletion);
@@ -146,12 +169,16 @@ public class AgentRuntimeContext {
         return totalCompletionTokens.get();
     }
 
-    /** 轮次自增，每次 scheduleRound 调用。 */
+    /**
+     * 轮次自增，每次 scheduleRound 调用。
+     */
     public int incrementRound() {
         return totalRounds.incrementAndGet();
     }
 
-    /** 从暂停恢复时还原轮次。 */
+    /**
+     * 从暂停恢复时还原轮次。
+     */
     public void setTotalRounds(int rounds) {
         totalRounds.set(rounds);
     }
@@ -160,8 +187,19 @@ public class AgentRuntimeContext {
         return totalRounds.get();
     }
 
-    /** stage 桥接快照。stage 重构暂缓，answer/toolRecords 暂传空值。 */
-    public StageContext toStageContext() {
-        return new StageContext(query, null, params, List.of());
+    public List<Message> getMessages() {
+        return messages;
+    }
+
+    public void setMessages(List<Message> messages) {
+        this.messages = messages;
+    }
+
+    public Consumer<AgentStreamEvent> getEmitter() {
+        return emitter;
+    }
+
+    public void setEmitter(Consumer<AgentStreamEvent> emitter) {
+        this.emitter = emitter;
     }
 }

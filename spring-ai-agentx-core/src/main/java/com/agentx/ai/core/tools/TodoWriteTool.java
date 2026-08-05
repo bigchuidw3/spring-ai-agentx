@@ -12,9 +12,6 @@ import org.springframework.ai.tool.annotation.ToolParam;
  * <p>
  * 使 AI 智能体能创建、追踪和更新任务列表，将隐式规划转为显式、可观测的工作流。
  * 校验规则：同一时间只能有一个 in_progress 任务，所有任务必须有有效的 content 和 activeForm。
- * <p>
- * 进度推送由框架自动处理：ToolCallExecutor 在执行完 TodoWrite 后，
- * 自动解析参数并发射 {@link com.agentx.ai.core.model.AgentStreamEvent.TodoProgress} 事件。
  *
  * @author Christian Tzolov (original), bigchui (adapted)
  */
@@ -120,9 +117,6 @@ public class TodoWriteTool {
 
 	/**
 	 * 创建 TodoWriteTool。
-	 * <p>
-	 * 框架在流式执行时自动发射 {@link com.agentx.ai.core.model.AgentStreamEvent.TodoProgress} 事件，
-	 * 无需手动处理进度回调。
 	 */
 	public static ToolCallback[] create() {
 		return ToolCallbacks.from(new TodoWriteTool());

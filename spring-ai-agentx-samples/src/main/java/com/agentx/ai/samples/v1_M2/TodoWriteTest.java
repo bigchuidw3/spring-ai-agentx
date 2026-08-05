@@ -21,7 +21,7 @@ import static com.agentx.ai.core.utils.ToolMergeUtil.mergeTools;
  *
  * <p>测试内容：
  * <ul>
- *   <li>测试 1：流式 — 多步骤任务的 TodoProgress 事件流</li>
+ *   <li>测试 1：流式 — 多步骤任务的事件流</li>
  *   <li>测试 2：非流式 — 验证 TodoWrite 在 callForResult 中正常工作</li>
  *   <li>测试 3：纯 TodoWrite — 无其他工具，仅任务列表管理</li>
  * </ul>
@@ -143,10 +143,7 @@ public class TodoWriteTest {
 
         System.out.println("--- Events End ---");
 
-        long todoProgressCount = allEvents.stream()
-                .filter(e -> e instanceof AgentStreamEvent.TodoProgress)
-                .count();
-        System.out.println("\nTodoProgress 事件数: " + todoProgressCount);
+        System.out.println("\n（共 " + allEvents.size() + " 个事件）");
     }
 
     // ===== Main =====

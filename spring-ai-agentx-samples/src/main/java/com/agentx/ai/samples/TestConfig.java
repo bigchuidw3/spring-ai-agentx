@@ -256,6 +256,24 @@ public final class TestConfig {
         );
     }
 
+    /**
+     * 创建使用错误 API Key 的 ChatModel，用于测试 ErrorEvent。
+     */
+    public static ChatModel createBadApiKeyChatModel() {
+        DeepSeekApi deepSeekApi = DeepSeekApi.builder()
+                .apiKey("sk-bad-api-key-for-testing-error-event")
+                .baseUrl(s("deepseek.base.url", "https://api.deepseek.com"))
+                .build();
+        DeepSeekChatOptions options = DeepSeekChatOptions.builder()
+                .model(s("deepseek.chat.model", "deepseek-chat"))
+                .temperature(0.7)
+                .build();
+        return DeepSeekV4ChatModel.builder()
+                .deepSeekApi(deepSeekApi)
+                .defaultOptions(options)
+                .build();
+    }
+
     public static DataSource createMySqlDataSource() {
         HikariDataSource ds = new HikariDataSource();
         ds.setJdbcUrl(s("mysql.url", "jdbc:mysql://localhost:3306/agent_test?useSSL=false&allowPublicKeyRetrieval=true"));
@@ -394,7 +412,6 @@ public final class TestConfig {
         }
 
         switch (event) {
-            case AgentStreamEvent.AgentStart s -> System.out.println("[AgentStart]");
             case AgentStreamEvent.Thinking t -> {
                 if (!lastEventWasThinking) {
                     System.out.print("\n[Thinking] ");
@@ -416,27 +433,10 @@ public final class TestConfig {
                     + (te.result() != null && te.result().length() > 80
                     ? te.result().substring(0, 80) + "..."
                     : te.result()));
-            case AgentStreamEvent.TodoProgress tp -> {
-                System.out.println("[TodoProgress] 任务列表更新:");
-                for (var item : tp.items()) {
-                    String icon = switch (item.status()) {
-                        case completed -> "[✓]";
-                        case in_progress -> "[→]";
-                        case pending -> "[ ]";
-                    };
-                    System.out.println("  " + icon + " " + item.content());
-                }
-            }
-            case AgentStreamEvent.StageOutput so ->
-                    System.out.println("\n[StageOutput:" + so.stage() + "] " + so.data());
             case AgentStreamEvent.Error e ->
                     System.out.println("\n[Error:" + e.code().code() + "] " + e.message() + "\n  " + e.detail());
             case AgentStreamEvent.Complete c -> System.out.println("\n[Complete]：promptTokens："+c.totalPromptTokens()+ "，completionTokens："+c.totalCompletionTokens());
             case AgentStreamEvent.Paused p -> System.out.println("[Paused]");
-            case AgentStreamEvent.ResumeStart rs -> System.out.println(
-                    "\n[ResumeStart] convId=" + rs.conversationId()
-                    + " pausedRound=" + rs.pausedRound()
-                    + " reason=" + rs.reason());
         }
     }
 

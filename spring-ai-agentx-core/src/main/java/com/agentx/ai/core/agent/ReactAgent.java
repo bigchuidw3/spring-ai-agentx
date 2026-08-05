@@ -1,6 +1,7 @@
 package com.agentx.ai.core.agent;
 
 import com.agentx.ai.core.context.ContextCompactor;
+import com.agentx.ai.core.hook.ContextCompactionHook;
 import com.agentx.ai.core.context.ContextPolicy;
 import com.agentx.ai.core.context.compress.CompressionStrategy;
 import com.agentx.ai.core.context.compress.LlmSummarizer;
@@ -24,9 +25,8 @@ import com.agentx.ai.core.model.AgentResult;
 import com.agentx.ai.core.model.AgentStreamEvent;
 import com.agentx.ai.core.model.PauseState;
 import com.agentx.ai.core.model.RunnableParams;
-import com.agentx.ai.core.model.StageOutputProvider;
-import com.agentx.ai.core.model.StageTiming;
 import com.agentx.ai.core.model.ThinkingMode;
+import com.agentx.ai.core.hook.AgentHook;
 import com.agentx.ai.core.memory.LongTermMemoryConfig;
 import com.agentx.ai.core.memory.LongTermMemoryManager;
 import com.agentx.ai.core.memory.store.DataSourceStorageFactory;
@@ -84,7 +84,7 @@ public class ReactAgent {
     private final LongTermMemoryManager longTermMemoryManager;
     private final DataSource dataSource;
     private boolean enableSession;
-    private final List<StageOutputProvider> stageOutputProviders;
+    private final List<AgentHook> hooks;
     private final ThinkingMode thinkingMode;
     private final int maxRetries;
     private final ContextPolicy contextPolicy;
@@ -139,7 +139,7 @@ public class ReactAgent {
         this.longTermMemoryManager = longTermMemoryManager;
         this.dataSource = builder.dataSource;
         this.enableSession = builder.enableSession;
-        this.stageOutputProviders = builder.stageOutputProviders;
+        this.hooks = builder.hooks;
         this.thinkingMode = builder.thinkingMode;
         this.maxRetries = builder.maxRetries;
         this.contextPolicy = builder.contextPolicy;
@@ -166,6 +166,9 @@ public class ReactAgent {
             }
         }
 
+        // Hook 列表：用户 Hook + 按需引入的上下文压缩 Hook（压缩 Hook 优先级最高，置列表首部）
+        List<AgentHook> allHooks = new ArrayList<>(hooks != null ? hooks : List.of());
+
         var executorBuilder = AgentLoopExecutor.builder()
                 .chatClient(chatClient)
                 .maxRounds(maxRounds)
@@ -179,12 +182,11 @@ public class ReactAgent {
                 .enableSession(enableSession)
                 .enableTrace(enableTrace)
                 .askUserToolName(askUserToolName)
-                .stageOutputProviders(stageOutputProviders)
                 .thinkingMode(thinkingMode)
                 .maxRetries(maxRetries)
                 .advisors(advisors);
 
-        // 上下文压缩（可选）
+        // 上下文压缩（可选，按需引入 ContextCompactionHook）
         if (this.contextPolicy != null) {
             OffloadStore offloadStore = (enableSession && sessionMessageStore != null)
                     ? new SessionBackedOffloadStore(sessionMessageStore)
@@ -201,7 +203,8 @@ public class ReactAgent {
                     this.contextPolicy, this.chatModel,
                     offloadStore, sessionMessageStore,
                     chain);
-            executorBuilder.contextCompactor(compactor);
+            // 压缩 Hook 置列表首部（priority=Integer.MAX_VALUE 已确保最先执行）
+            allHooks.add(0, new ContextCompactionHook(compactor));
 
             // context_reload 工具（仅在启用 session 时注册，追加到用户已配置的 tools 之后）
             if (enableSession && sessionMessageStore != null) {
@@ -214,6 +217,7 @@ public class ReactAgent {
                 executorBuilder.tools(merged);
             }
         }
+        executorBuilder.hooks(allHooks);
 
         // 长期记忆（可选）
         if (longTermMemoryManager != null) {
@@ -569,7 +573,7 @@ public class ReactAgent {
         private LongTermMemoryConfig longTermMemoryConfig;
         private boolean enableSession = true;
         private boolean askUser = false;
-        private final List<StageOutputProvider> stageOutputProviders = new ArrayList<>();
+        private final List<AgentHook> hooks = new ArrayList<>();
         private ThinkingMode thinkingMode = ThinkingMode.DISABLED;
         private int maxRetries = 3;
         private ContextPolicy contextPolicy;
@@ -709,36 +713,33 @@ public class ReactAgent {
         }
 
         /**
-         * 注册自定义阶段输出提供者。
-         * <p>
-         * Provider 会在其声明的 {@link StageTiming} 时机被自动调用，
-         * 产生的输出作为 {@link AgentStreamEvent.StageOutput} 事件推送给调用方。
+         * 注册 Hook，在 Agent 生命周期关键节点被调用。
          *
          * <p>示例：
          * <pre>{@code
-         * .stageOutputProviders(
-         *     new ReferenceProvider(),
-         *     new RecommendProvider(chatModel)
+         * .hooks(
+         *     new SandboxHook(),
+         *     new CompressionHook()
          * )
          * }</pre>
          *
-         * @param providers 阶段输出提供者
+         * @param hooks Hook 实例
          */
-        public Builder stageOutputProviders(StageOutputProvider... providers) {
-            if (providers != null) {
-                this.stageOutputProviders.addAll(List.of(providers));
+        public Builder hooks(AgentHook... hooks) {
+            if (hooks != null) {
+                this.hooks.addAll(List.of(hooks));
             }
             return this;
         }
 
         /**
-         * 注册自定义阶段输出提供者（List 形式）。
+         * 注册 Hook（List 形式）。
          *
-         * @param providers 阶段输出提供者列表
+         * @param hooks Hook 列表
          */
-        public Builder stageOutputProviders(List<StageOutputProvider> providers) {
-            if (providers != null) {
-                this.stageOutputProviders.addAll(providers);
+        public Builder hooks(List<AgentHook> hooks) {
+            if (hooks != null) {
+                this.hooks.addAll(hooks);
             }
             return this;
         }

@@ -143,13 +143,10 @@ public class SubAgentTool {
      */
     private static AgentStreamEvent withSource(AgentStreamEvent event, SubAgentSource source) {
         return switch (event) {
-            case AgentStreamEvent.AgentStart e -> new AgentStreamEvent.AgentStart(source);
             case AgentStreamEvent.Thinking e -> new AgentStreamEvent.Thinking(e.content(), source);
             case AgentStreamEvent.Text e -> new AgentStreamEvent.Text(e.content(), source);
             case AgentStreamEvent.ToolStart e -> new AgentStreamEvent.ToolStart(e.toolName(), e.toolCallId(), e.arguments(), source);
             case AgentStreamEvent.ToolEnd e -> new AgentStreamEvent.ToolEnd(e.toolName(), e.toolCallId(), e.result(), source);
-            case AgentStreamEvent.TodoProgress e -> new AgentStreamEvent.TodoProgress(e.items(), source);
-            case AgentStreamEvent.StageOutput e -> new AgentStreamEvent.StageOutput(e.stage(), e.data(), source);
             case AgentStreamEvent.Error e -> new AgentStreamEvent.Error(e.code(), e.message(), e.detail(), source);
             case AgentStreamEvent.Complete e -> new AgentStreamEvent.Complete(
                     e.totalPromptTokens(), e.totalCompletionTokens(), source);
