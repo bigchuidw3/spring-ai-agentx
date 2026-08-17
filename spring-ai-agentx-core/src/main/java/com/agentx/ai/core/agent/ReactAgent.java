@@ -32,6 +32,12 @@ import com.agentx.ai.core.memory.LongTermMemoryManager;
 import com.agentx.ai.core.memory.store.DataSourceStorageFactory;
 import com.agentx.ai.core.memory.store.SessionMessageStore;
 import com.agentx.ai.core.memory.store.ConversationStore;
+import com.agentx.ai.core.sandbox.*;
+import com.agentx.ai.core.sandbox.snapshot.InMemorySnapshotMetadataStore;
+import com.agentx.ai.core.sandbox.snapshot.JdbcSnapshotMetadataStore;
+import com.agentx.ai.core.sandbox.snapshot.LocalSnapshotStorage;
+import com.agentx.ai.core.sandbox.snapshot.SnapshotMetadataStore;
+import com.agentx.ai.core.sandbox.snapshot.SnapshotStorage;
 import com.agentx.ai.core.tools.AskUserTool;
 import com.agentx.ai.core.tools.ContextReloadTool;
 import com.agentx.ai.core.trace.TraceStore;
@@ -45,6 +51,7 @@ import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.api.Advisor;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
+import org.springframework.ai.support.ToolCallbacks;
 import org.springframework.ai.tool.ToolCallback;
 import reactor.core.publisher.Flux;
 
@@ -88,6 +95,8 @@ public class ReactAgent {
     private final ThinkingMode thinkingMode;
     private final int maxRetries;
     private final ContextPolicy contextPolicy;
+    private final SandboxConfig sandboxConfig;
+    private final SandboxManager sandboxManager;
     private final DeferredToolRegistry deferredToolRegistry;
     private TraceStore traceStore;
     private final boolean enableTrace;
@@ -105,6 +114,12 @@ public class ReactAgent {
                        TraceStore traceStore,
                        PauseStateStore stateStore) {
         this.deferredToolRegistry = builder.deferredToolRegistry;
+
+        // 开启上下文压缩且有会话存储时，注入 context_reload 工具（LLM 按需取回 offload 原文）
+        // 必须在构建 ChatClient 前注入，否则 LLM 请求不携带该工具定义
+        if (builder.contextPolicy != null && builder.enableSession && sessionMessageStore != null) {
+            builder.tools.addAll(List.of(ToolCallbacks.from(new ContextReloadTool(sessionMessageStore))));
+        }
 
         // 构建 ChatClient，统一配置工具选项和 Advisors
         ChatClient.Builder clientBuilder = ChatClient.builder(builder.chatModel);
@@ -143,9 +158,46 @@ public class ReactAgent {
         this.thinkingMode = builder.thinkingMode;
         this.maxRetries = builder.maxRetries;
         this.contextPolicy = builder.contextPolicy;
+        this.sandboxConfig = builder.sandboxConfig;
+        this.sandboxManager = buildSandboxManager(builder);
         this.traceStore = traceStore;
         this.enableTrace = builder.enableTrace;
         this.stateStore = stateStore;
+    }
+
+    private static SandboxManager buildSandboxManager(Builder builder) {
+        SandboxConfig config = builder.sandboxConfig;
+        if (config == null) {
+            return null;
+        }
+        SandboxBackend backend = config.getBackend();
+        if (!backend.isAvailable()) {
+            if (config.isStrictMode()) {
+                throw new IllegalStateException("沙箱后端不可用（严格模式）: "
+                        + backend.getClass().getSimpleName());
+            }
+            log.warn("[ReactAgent] 沙箱后端不可用，跳过沙箱，退化为宿主执行");
+            return null;
+        }
+        SnapshotStorage snapshotStorage = config.getSnapshotStorage();
+        if (snapshotStorage == null) {
+            snapshotStorage = new LocalSnapshotStorage(config.getSnapshotDir());
+            log.info("[ReactAgent] 快照存储: LocalSnapshotStorage(dir={})", config.getSnapshotDir());
+        } else {
+            log.info("[ReactAgent] 快照存储: {}", snapshotStorage.getClass().getSimpleName());
+        }
+        SnapshotMetadataStore metadataStore = config.getSnapshotMetadataStore();
+        if (metadataStore == null) {
+            metadataStore = builder.dataSource != null
+                    ? new JdbcSnapshotMetadataStore(builder.dataSource)
+                    : new InMemorySnapshotMetadataStore();
+            if (metadataStore instanceof JdbcSnapshotMetadataStore jdbc) {
+                jdbc.initialize();
+            }
+        }
+        log.info("[ReactAgent] 沙箱已启用: backend={}, scope={}",
+                backend.getClass().getSimpleName(), config.getIsolationScope());
+        return new SandboxManager(config, backend, snapshotStorage, metadataStore);
     }
 
     /**
@@ -205,18 +257,13 @@ public class ReactAgent {
                     chain);
             // 压缩 Hook 置列表首部（priority=Integer.MAX_VALUE 已确保最先执行）
             allHooks.add(0, new ContextCompactionHook(compactor));
-
-            // context_reload 工具（仅在启用 session 时注册，追加到用户已配置的 tools 之后）
-            if (enableSession && sessionMessageStore != null) {
-                ToolCallback[] reloadCallbacks = org.springframework.ai.support.ToolCallbacks.from(
-                        new ContextReloadTool(sessionMessageStore));
-                List<ToolCallback> merged = new ArrayList<>(tools);
-                for (ToolCallback tc : reloadCallbacks) {
-                    merged.add(tc);
-                }
-                executorBuilder.tools(merged);
-            }
         }
+
+        // 沙箱（可选，按需引入 SandboxHook）
+        if (this.sandboxManager != null) {
+            allHooks.add(new com.agentx.ai.core.hook.SandboxHook(this.sandboxManager));
+        }
+
         executorBuilder.hooks(allHooks);
 
         // 长期记忆（可选）
@@ -577,6 +624,7 @@ public class ReactAgent {
         private ThinkingMode thinkingMode = ThinkingMode.DISABLED;
         private int maxRetries = 3;
         private ContextPolicy contextPolicy;
+        private SandboxConfig sandboxConfig;
         private DeferredToolRegistry deferredToolRegistry;
         private boolean enableTrace = true;
         private PauseStateStore stateStore;
@@ -822,6 +870,28 @@ public class ReactAgent {
          */
         public Builder contextPolicy(ContextPolicy contextPolicy) {
             this.contextPolicy = contextPolicy;
+            return this;
+        }
+
+        /**
+         * 配置沙箱，启用隔离执行。
+         * <p>
+         * 沙箱后端与专属配置在 {@code SandboxConfig.backend(...)} 中显式指定：
+         * <pre>{@code
+         * .sandbox(SandboxConfig.builder()
+         *         .backend(DockerBackend.builder()
+         *                 .image("ubuntu:22.04")
+         *                 .build())
+         *         .snapshotDir(Path.of("/data/agentx-snapshots"))
+         *         .strictMode(true)
+         *         .build())
+         * }</pre>
+         * <p>
+         * 默认模式下后端不可用时自动退化为宿主执行；strictMode(true) 时构建直接失败，
+         * 运行期获取失败时工具调用报错，均不降级。
+         */
+        public Builder sandbox(SandboxConfig sandboxConfig) {
+            this.sandboxConfig = sandboxConfig;
             return this;
         }
 

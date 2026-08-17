@@ -1,7 +1,10 @@
 package com.agentx.ai.core.tools;
 
+import com.agentx.ai.core.sandbox.ExecutionBackend;
+import com.agentx.ai.core.sandbox.SandboxToolContexts;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.support.ToolCallbacks;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.annotation.Tool;
@@ -184,7 +187,14 @@ public class GrepTool {
             @ToolParam(description = "匹配行后显示的上下文行数", required = false) Integer afterContext,
             @ToolParam(description = "是否忽略大小写（默认 false）", required = false) Boolean ignoreCase,
             @ToolParam(description = "最大返回结果数", required = false) Integer headLimit,
-            @ToolParam(description = "跳过前 N 条结果", required = false) Integer offset) { // @formatter:on
+            @ToolParam(description = "跳过前 N 条结果", required = false) Integer offset,
+            ToolContext toolContext) { // @formatter:on
+
+        ExecutionBackend eb = SandboxToolContexts.extract(toolContext);
+        if (eb != null && eb.isSandboxed()) {
+            return grepViaBackend(eb, pattern, path, glob, outputMode,
+                    beforeContext, afterContext, ignoreCase, headLimit, offset);
+        }
 
         log.debug("Grep called: pattern={}, path={}, glob={}, mode={}",
             pattern, path, glob, outputMode);
@@ -472,6 +482,28 @@ public class GrepTool {
 
         // content 模式
         return String.join("\n", lines);
+    }
+
+    /**
+     * 通过 ExecutionBackend 执行 grep（沙箱路径）。
+     */
+    private String grepViaBackend(ExecutionBackend eb, String pattern, String path,
+                                   String glob, String outputMode,
+                                   Integer beforeContext, Integer afterContext,
+                                   Boolean ignoreCase, Integer headLimit, Integer offset) {
+        try {
+            String outputModeVal = (outputMode != null && !outputMode.isEmpty()) ? outputMode : "content";
+            int beforeVal = beforeContext != null ? beforeContext : DEFAULT_CONTEXT_LINES;
+            int afterVal = afterContext != null ? afterContext : DEFAULT_CONTEXT_LINES;
+            boolean ignoreCaseVal = Boolean.TRUE.equals(ignoreCase);
+            int headLimitVal = headLimit != null ? headLimit : DEFAULT_HEAD_LIMIT;
+            int offsetVal = offset != null ? offset : 0;
+            return eb.grep(pattern, path, glob, outputModeVal,
+                    beforeVal, afterVal, ignoreCaseVal, headLimitVal, offsetVal);
+        } catch (Exception e) {
+            log.error("Grep via backend failed", e);
+            return "Error: " + e.getMessage();
+        }
     }
 
     /**

@@ -34,6 +34,12 @@ build/
 .claude/
 **/CLAUDE.md
 **/.claude
+.codex
+**/.codex
 
 ### Secrets ###
 **/secrets.properties
+
+### Sandbox snapshots / workspaces ###
+agentx-snapshots/
+sandbox-test-workspace/

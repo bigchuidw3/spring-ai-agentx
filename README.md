@@ -2,7 +2,7 @@
 
 基于原生 Spring AI 的智能体（Agent）开发框架，提供 ReAct 执行引擎、当前会话记忆、长期记忆、上下文压缩、工具调度、Human-in-the-Loop 等核心能力，帮助开发者快速构建可落地的 Java Agent。
 
-> 当前发布版本：1.0.1
+> 当前发布版本：1.0.1-M1
 >
 > 历史版本：1.0.0-M2
 >
@@ -40,6 +40,7 @@ Spring AI AgentX 是一款面向 Java 开发者的 AI Agent 开发框架。框�
 | 思考模型适配 | 支持 `<think/>` 标签和 `reasoning_content` 两种思考输出格式，内置 `DeepSeekV4ChatModel` 兼容修复 |
 | 异常处理与重试 | 内置透明重试机制，统一异常处理（AgentException + AgentErrorCode） |
 | Hook 生命周期机制 | 7 个 Hook 事件覆盖 Agent 全生命周期，支持 Before* 干预输入和 After* 观测结果，通过 AgentRuntimeContext 操控共享状态 |
+| 沙箱隔离执行 | BashTool / FileSystemTools / GrepTool 在 Docker 容器或本地受限目录中执行；调用结束快照持久化，下次调用自动恢复；支持 CONVERSATION / USER 隔离级别与严格模式 fail-closed |
 
 ## v1.0.1 相对 v1.0.0-M2 做了哪些调整
 
@@ -114,7 +115,7 @@ mvn clean install -DskipTests
 <dependency>
     <groupId>com.agentx.ai</groupId>
     <artifactId>spring-ai-agentx-core</artifactId>
-    <version>1.0.1</version>
+    <version>1.0.1-M1</version>
 </dependency>
 ```
 
@@ -173,8 +174,9 @@ AgentResult result = agent.callForResult("帮我查一下北京天气，并给�
 | [18-SubAgent子代理](docs/core/v1_1/18-SubAgent子代理.md) | `call_{name}` 委派模型、父子会话边界和当前限制 |
 | [19-中断与恢复](docs/core/v1_1/19-中断与恢复.md) | PauseState 持久化、HITL/Interrupt 两种暂停语义与恢复规则 |
 | [20-Hook机制](docs/core/v1_1/20-Hook机制.md) | 7 个生命周期 Hook 事件、AgentRuntimeContext 共享上下文、与 AgentStreamEvent 的关系 |
+| [21-沙箱隔离执行](docs/core/v1_1/21-沙箱隔离执行.md) | 沙箱架构分层、Docker / Local 快速开始、容器生命周期、快照持久化选型、多节点部署方案 |
 
-推荐阅读顺序：05 → 11 → 13 → 19 → 18 → 20。
+推荐阅读顺序：05 → 11 → 13 → 19 → 18 → 20 → 21。
 
 ## 其他专题文档（沿用 v1.0.0-M2）
 
@@ -211,10 +213,11 @@ AgentResult result = agent.callForResult("帮我查一下北京天气，并给�
 | `InterruptResumeSessionTest` | `USER_INTERRUPT` / `HITL_TOOL_REQUEST` 暂停恢复与会话落库 |
 | `SubAgentSessionTest` | SubAgent 流式委派时，只有父 Agent 写 `agentx_session` |
 | `HookTest` | 7 种 Hook 事件的注册、参数改写、流式注入、异常捕获 |
+| `SandboxTest` / `DockerSandboxTest` | Local 与 Docker 两种沙箱模式的工具执行、快照恢复、隔离级别 |
 
 ## 版本路线图
 
-### v1.0.1（当前发布版本）
+### v1.0.1-M1（当前发布版本）
 
 - 当前会话记忆三态模型（`original_messages` / `working_messages` / `offload_context`）
 - 新增 `agentx_conversation` 表，独立记录调用边界
@@ -224,6 +227,7 @@ AgentResult result = agent.callForResult("帮我查一下北京天气，并给�
 - SubAgent 约束与父 Agent 会话边界明确
 - 长期记忆：VectorStore 驱动，从 `original_messages` 异步抽取 → 去重合并 → 跨会话注入
 - Hook 生命周期机制：7 个 Hook 事件覆盖全生命周期，Before* 干预输入 / After* 观测结果
+- 沙箱隔离执行：Docker / Local 双后端，快照持久化与自动恢复，严格模式 fail-closed
 
 ### v1.0.0-M2（历史版本）
 
@@ -253,7 +257,6 @@ AgentResult result = agent.callForResult("帮我查一下北京天气，并给�
 
 ### 规划中
 
-- 执行沙箱
 - Plan & Execute 架构
 - Agent Teams
 - 可观测性体系

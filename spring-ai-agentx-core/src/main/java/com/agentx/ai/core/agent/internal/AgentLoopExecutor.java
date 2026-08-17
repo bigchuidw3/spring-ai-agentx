@@ -315,6 +315,10 @@ public class AgentLoopExecutor {
         sessionPersister.initSession(execCtx, params, query);
         AtomicLong roundCounter = new AtomicLong(0);
 
+        if (!hookManager.isEmpty()) {
+            hookManager.fireEvent(new BeforeCallEvent(execCtx));
+        }
+
         registerInterruptContext(messages, sink, params, query, execCtx, roundCounter);
 
         return blockForResult(messages, sink, roundCounter, params, execCtx, query);
@@ -357,11 +361,13 @@ public class AgentLoopExecutor {
         if (errorHolder[0] != null) {
             execCtx.markTerminal("error");
             sessionPersister.persistOnTerminal(execCtx, messages, SignalType.ON_ERROR);
+            fireAfterCallOnce(execCtx, null, 0);
             return new AgentResult.Failed(errorHolder[0], AgentErrorCode.LLM_CALL_FAILED);
         }
         if (pauseHolder[0] != null) {
             execCtx.markTerminal("interrupted");
             sessionPersister.persistOnTerminal(execCtx, messages, SignalType.CANCEL);
+            fireAfterCallOnce(execCtx, null, 0);
             return new AgentResult.Paused(pauseHolder[0]);
         }
 
@@ -372,6 +378,7 @@ public class AgentLoopExecutor {
 
         execCtx.markTerminal("completed");
         sessionPersister.persistOnTerminal(execCtx, messages, SignalType.ON_COMPLETE);
+        fireAfterCallOnce(execCtx, null, 0);
 
         return new AgentResult.Completed(
                 finalAnswer,
@@ -416,6 +423,10 @@ public class AgentLoopExecutor {
         execCtx.setNewMsgStartIndex(state.getMessages().size());
         execCtx.setOriginalMessagesSnapshot(new ArrayList<>(messages));
         String effectiveQuery = sessionPersister.initSessionFromResume(execCtx, state, resumeQuery);
+
+        if (!hookManager.isEmpty()) {
+            hookManager.fireEvent(new BeforeCallEvent(execCtx));
+        }
 
         registerInterruptContext(messages, sink, state.getParams(), effectiveQuery, execCtx, roundCounter);
 
@@ -533,6 +544,10 @@ public class AgentLoopExecutor {
         execCtx.setOriginalMessagesSnapshot(new ArrayList<>(messages));
         String effectiveQuery = sessionPersister.initSessionFromResume(execCtx, state, resumeQuery);
 
+        if (!hookManager.isEmpty()) {
+            hookManager.fireEvent(new BeforeCallEvent(execCtx));
+        }
+
         registerInterruptContext(messages, sink, state.getParams(), effectiveQuery, execCtx, roundCounter);
 
         // disposable 的注册由 scheduleRound 内部每轮刷新负责，此处不再手动 setDisposable
@@ -567,6 +582,8 @@ public class AgentLoopExecutor {
                     // 异常终止兜底：不信任 Reactor signal，统一按 CANCEL 处理（自然完成已显式落库）
                     SignalType fallbackSignal = signal == SignalType.ON_ERROR ? SignalType.ON_ERROR : SignalType.CANCEL;
                     sessionPersister.persistOnTerminal(execCtx, messages, fallbackSignal);
+                    // 确保沙箱在所有终止路径（暂停/中断/错误/取消/断连）上释放
+                    fireAfterCallOnce(execCtx, null, 0);
                     if (taskManager != null && conversationId != null) {
                         taskManager.stopTask(conversationId);
                     }
@@ -575,6 +592,17 @@ public class AgentLoopExecutor {
 
     private void handleStreamError(String conversationId, Throwable err) {
         log.error("\n\n Stream error: conversationId={}", conversationId, err);
+    }
+
+    /**
+     * 幂等触发 AfterCallEvent。保证一次调用中恰好触发一次，
+     * 覆盖正常完成、HITL 暂停、用户中断、LLM 错误、stopTask、客户端断连等所有终止路径。
+     * SandboxHook 依赖此事件释放容器资源。
+     */
+    private void fireAfterCallOnce(AgentRuntimeContext execCtx, String answer, long durationMs) {
+        if (!hookManager.isEmpty() && execCtx.tryFireAfterCall()) {
+            hookManager.fireEvent(new AfterCallEvent(execCtx, answer, durationMs));
+        }
     }
 
     /**
@@ -755,10 +783,7 @@ public class AgentLoopExecutor {
             execCtx.markTerminal("completed");
             sessionPersister.persistOnTerminal(execCtx, messages, SignalType.ON_COMPLETE);
             // AFTER_CALL hook（终态已标记、已持久化）
-            if (!hookManager.isEmpty()) {
-                hookManager.fireEvent(new AfterCallEvent(
-                        execCtx, state.textBuffer.toString(), durationMs));
-            }
+            fireAfterCallOnce(execCtx, state.textBuffer.toString(), durationMs);
             EmitResult completeResult = sink.tryEmitNext(new AgentStreamEvent.Complete(
                     execCtx.getTotalPromptTokens(), execCtx.getTotalCompletionTokens(),
                     conversationId, execCtx.getSessionId(), null));
@@ -922,10 +947,7 @@ public class AgentLoopExecutor {
                     // 标记终态：显式落库后再 complete sink，避免 doFinally 时序竞态
                     execCtx.markTerminal("completed");
                     sessionPersister.persistOnTerminal(execCtx, messages, SignalType.ON_COMPLETE);
-                    if (!hookManager.isEmpty()) {
-                        hookManager.fireEvent(new AfterCallEvent(
-                                execCtx, answerBuffer.toString(), 0));
-                    }
+                    fireAfterCallOnce(execCtx, answerBuffer.toString(), 0);
                     sink.tryEmitNext(new AgentStreamEvent.Complete(
                             execCtx.getTotalPromptTokens(), execCtx.getTotalCompletionTokens(),
                             conversationId, execCtx.getSessionId(), null));

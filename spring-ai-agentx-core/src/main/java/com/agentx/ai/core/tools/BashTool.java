@@ -1,7 +1,11 @@
 package com.agentx.ai.core.tools;
 
+import com.agentx.ai.core.sandbox.ExecutionBackend;
+import com.agentx.ai.core.sandbox.SandboxToolContexts;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
@@ -9,6 +13,7 @@ import org.springframework.ai.tool.function.FunctionToolCallback;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Bash Tool - Shell 命令执行工具
@@ -19,6 +24,7 @@ import java.util.List;
 public class BashTool {
 
     private static final Logger log = LoggerFactory.getLogger(BashTool.class);
+    private static final ObjectMapper objectMapper = new ObjectMapper();
     private static final String DEFAULT_SESSION_ID = "default";
 
     private final ShellSessionManager sessionManager;
@@ -28,12 +34,12 @@ public class BashTool {
 
     private BashTool(Builder builder) {
         this.sessionManager = builder.sessionManager != null
-            ? builder.sessionManager
-            : ShellSessionManager.builder()
-                .maxLines(builder.maxLines)
-                .maxBytes(builder.maxBytes)
-                .timeoutMs(builder.timeoutMs)
-                .build();
+                ? builder.sessionManager
+                : ShellSessionManager.builder()
+                  .maxLines(builder.maxLines)
+                  .maxBytes(builder.maxBytes)
+                  .timeoutMs(builder.timeoutMs)
+                  .build();
         this.defaultTimeoutMs = builder.timeoutMs;
         this.maxLines = builder.maxLines;
         this.maxBytes = builder.maxBytes;
@@ -41,7 +47,7 @@ public class BashTool {
 
     /**
      * 创建 Bash 工具的 ToolCallback 数组（默认配置）
-     *
+     * <p>
      * 这是一个便捷方法，使用默认配置创建工具实例。
      * 工具描述会根据当前操作系统动态生成，确保 LLM 生成正确的命令。
      *
@@ -50,12 +56,12 @@ public class BashTool {
     public static ToolCallback[] create() {
         BashTool tool = builder().build();
         String dynamicDescription = buildDynamicDescription();
-        return new ToolCallback[]{
-            FunctionToolCallback.builder("bash", new BashToolFunction(tool))
+        ToolCallback delegate = FunctionToolCallback
+                .builder("bash", new BashToolFunction(tool))
                 .description(dynamicDescription)
                 .inputType(BashToolFunction.Request.class)
-                .build()
-        };
+                .build();
+        return new ToolCallback[]{new BashToolCallback(tool, delegate)};
     }
 
     /**
@@ -81,7 +87,7 @@ public class BashTool {
                     - 用 'findstr' 代替 'grep'
                     - 路径使用反斜杠: C:\\Users\\...
                     - 用 '&&' 或 '&' 连接多条命令
-
+                    
                     **Python 注意事项（重要）:**
                     - 复杂代码或第三方库：先写入 .py 文件，再执行 python script.py
                     - 正确写法: python -c "open('s.py','w',encoding='utf-8').write('''代码''')" && python s.py
@@ -97,21 +103,21 @@ public class BashTool {
 
         return """
                 在持久化 Shell 会话中执行命令。
-
+                
                 **当前操作系统: %s**
-
+                
                 %s
-
+                
                 适用场景:
                 - 执行 Shell 命令、系统命令、git 操作
                 - 运行 Python 脚本: python script.py
                 - 安装包、构建工具等
-
+                
                 Shell 会话特性:
                 - 工作目录持久化（用 'cd' 切换）
                 - 环境变量持久化
                 - 设置 restart=true 可清除会话状态
-
+                
                 ⚠️ 工具优先级（重要）:
                 本工具是最后的手段，请优先使用专用工具:
                 - 读取文件 → read_file（不要用 cat/head/tail）
@@ -132,13 +138,13 @@ public class BashTool {
 
     /**
      * 执行 Shell 命令
-     *
+     * <p>
      * 此方法被标记为 @Tool，可被 LLM 调用。
      * 支持通过 restart 参数重启会话。
      *
-     * @param command        要执行的命令
-     * @param restart        是否重启会话（可选，默认 false）
-     * @param timeoutMs      超时时间（可选，默认使用配置值）
+     * @param command   要执行的命令
+     * @param restart   是否重启会话（可选，默认 false）
+     * @param timeoutMs 超时时间（可选，默认使用配置值）
      * @return 命令执行结果
      */
     // @formatter:off
@@ -183,9 +189,9 @@ public class BashTool {
         // 执行命令
         try {
             ShellSessionManager.CommandResult result = sessionManager.executeCommand(
-                sessionId,
-                command,
-                null  // 工作目录由会话管理器自动处理
+                    sessionId,
+                    command,
+                    null  // 工作目录由会话管理器自动处理
             );
 
             // 格式化输出
@@ -299,7 +305,7 @@ public class BashTool {
 
     /**
      * Bash 工具的 Function 包装类。
-     *
+     * <p>
      * 用于 FunctionToolCallback，支持动态描述。
      */
     private static class BashToolFunction implements java.util.function.Function<BashToolFunction.Request, String> {
@@ -313,9 +319,9 @@ public class BashTool {
         @Override
         public String apply(Request request) {
             return bashTool.executeShellCommand(
-                request.command(),
-                request.restart(),
-                request.timeoutMs()
+                    request.command(),
+                    request.restart(),
+                    request.timeoutMs()
             );
         }
 
@@ -323,9 +329,67 @@ public class BashTool {
          * Bash 工具请求
          */
         record Request(
-            String command,
-            Boolean restart,
-            Long timeoutMs
-        ) {}
+                String command,
+                Boolean restart,
+                Long timeoutMs
+        ) {
+        }
+    }
+
+    /**
+     * 包装的 ToolCallback，在 call 时提取 ExecutionBackend。
+     *
+     * <p>沙箱模式：直接委托 {@link ExecutionBackend#executeCommand}；
+     * 非沙箱模式：委托原 {@link FunctionToolCallback}。
+     */
+    private static class BashToolCallback implements ToolCallback {
+
+        private final BashTool bashTool;
+        private final ToolCallback delegate;
+
+        BashToolCallback(BashTool bashTool, ToolCallback delegate) {
+            this.bashTool = bashTool;
+            this.delegate = delegate;
+        }
+
+        @Override
+        public String call(String toolInput, ToolContext toolContext) {
+            ExecutionBackend eb = SandboxToolContexts.extract(toolContext);
+            if (eb != null && eb.isSandboxed()) {
+                return executeInSandbox(eb, toolInput);
+            }
+            return delegate.call(toolInput, toolContext);
+        }
+
+        @Override
+        public String call(String toolInput) {
+            return delegate.call(toolInput);
+        }
+
+        @Override
+        public org.springframework.ai.tool.definition.ToolDefinition getToolDefinition() {
+            return delegate.getToolDefinition();
+        }
+
+        @SuppressWarnings("unchecked")
+        private String executeInSandbox(ExecutionBackend eb, String toolInput) {
+            try {
+                Map<String, Object> input = objectMapper.readValue(toolInput, Map.class);
+                String command = (String) input.get("command");
+                if (command == null || command.isBlank()) {
+                    return "Error: command is required";
+                }
+                long timeout = bashTool.defaultTimeoutMs;
+                Object timeoutObj = input.get("timeoutMs");
+                if (timeoutObj instanceof Number n) {
+                    timeout = n.longValue();
+                }
+                ShellSessionManager.CommandResult result = eb.executeCommand(command, timeout);
+                return bashTool.formatResult(result);
+            } catch (Exception e) {
+                log.error("Sandbox bash execution error: {}", e.getMessage(), e);
+                return "Error executing command: " + e.getMessage();
+            }
+        }
     }
 }

@@ -1,7 +1,10 @@
 package com.agentx.ai.core.tools;
 
+import com.agentx.ai.core.sandbox.ExecutionBackend;
+import com.agentx.ai.core.sandbox.SandboxToolContexts;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.support.ToolCallbacks;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.annotation.Tool;
@@ -151,7 +154,13 @@ public class FileSystemTools {
             @ToolParam(description = "【必填】要读取的文件路径，禁止传空。支持绝对路径或相对路径。例如: 'pom.xml'、'./src/main/java/App.java'") String filePath,
             @ToolParam(description = "起始行偏移量（默认: 0）", required = false) Integer offset,
             @ToolParam(description = "最大读取行数（默认: 500）", required = false) Integer limit,
-            @ToolParam(description = "图片编码格式（可选）", required = false) String imageFormat) { // @formatter:on
+            @ToolParam(description = "图片编码格式（可选）", required = false) String imageFormat,
+            ToolContext toolContext) { // @formatter:on
+
+        ExecutionBackend eb = SandboxToolContexts.extract(toolContext);
+        if (eb != null && eb.isSandboxed()) {
+            return readFileViaBackend(eb, filePath, offset, limit);
+        }
 
         try {
             Path resolvedPath = resolvePath(filePath);
@@ -163,6 +172,138 @@ public class FileSystemTools {
         } catch (Exception e) {
             logger.error("Error reading file '{}': {}", filePath, e.getMessage(), e);
             return "Error reading file '" + filePath + "': " + e.getMessage();
+        }
+    }
+
+    /**
+     * 通过 ExecutionBackend 读取文件（沙箱路径）。
+     */
+    private String readFileViaBackend(ExecutionBackend eb, String filePath, Integer offset, Integer limit) {
+        try {
+            byte[] data = eb.readFile(filePath);
+            String content = new String(data, StandardCharsets.UTF_8);
+            if (content.trim().isEmpty()) {
+                return EMPTY_CONTENT_WARNING;
+            }
+            String[] lines = content.split("\n", -1);
+            if (lines.length > 0 && lines[lines.length - 1].isEmpty()) {
+                lines = Arrays.copyOf(lines, lines.length - 1);
+            }
+            int startIdx = offset != null ? offset : 0;
+            int endIdx = Math.min(startIdx + (limit != null ? limit : DEFAULT_LINE_LIMIT), lines.length);
+            if (startIdx >= lines.length) {
+                return "Error: Line offset " + startIdx + " exceeds file length (" + lines.length + " lines)";
+            }
+            if (startIdx < 0) {
+                return "Error: Line offset cannot be negative";
+            }
+            String[] selectedLines = Arrays.copyOfRange(lines, startIdx, endIdx);
+            return formatContentWithLineNumbers(selectedLines, startIdx + 1);
+        } catch (Exception e) {
+            logger.error("Error reading file via backend '{}': {}", filePath, e.getMessage(), e);
+            return "Error reading file '" + filePath + "': " + e.getMessage();
+        }
+    }
+
+    /**
+     * 通过 ExecutionBackend 写入文件（沙箱路径）。
+     */
+    private String writeFileViaBackend(ExecutionBackend eb, String filePath, String content) {
+        try {
+            byte[] contentBytes = content != null ? content.getBytes(StandardCharsets.UTF_8) : new byte[0];
+            eb.writeFile(filePath, contentBytes);
+            logger.info("Successfully created file via backend: {} ({} bytes)", filePath, contentBytes.length);
+            return "Successfully created file: " + filePath;
+        } catch (Exception e) {
+            logger.error("Error writing file via backend '{}': {}", filePath, e.getMessage(), e);
+            return "Error writing file '" + filePath + "': " + e.getMessage();
+        }
+    }
+
+    /**
+     * 通过 ExecutionBackend 编辑文件（沙箱路径）—— 先读后改再写。
+     */
+    private String editFileViaBackend(ExecutionBackend eb, String filePath,
+                                       String oldString, String newString, Boolean replaceAll) {
+        try {
+            if (oldString == null || oldString.isEmpty()) {
+                return "Error: old_string cannot be null or empty";
+            }
+            if (oldString.equals(newString)) {
+                return "Error: new_string must be different from old_string";
+            }
+            boolean replaceAllFlag = Boolean.TRUE.equals(replaceAll);
+            String content = new String(eb.readFile(filePath), StandardCharsets.UTF_8);
+            int occurrences = countOccurrences(content, oldString);
+            if (occurrences == 0) {
+                return "Error: String not found in file: '" + oldString + "'";
+            }
+            if (!replaceAllFlag && occurrences > 1) {
+                return "Error: String '" + oldString + "' appears " + occurrences +
+                       " times in file. Use replaceAll=true to replace all instances, " +
+                       "or provide a more specific string with surrounding context.";
+            }
+            String newContent;
+            if (replaceAllFlag) {
+                newContent = content.replace(oldString, newString);
+            } else {
+                int replaceIndex = content.indexOf(oldString);
+                newContent = content.substring(0, replaceIndex) + newString +
+                             content.substring(replaceIndex + oldString.length());
+            }
+            eb.writeFile(filePath, newContent.getBytes(StandardCharsets.UTF_8));
+            logger.info("Successfully edited file via backend: {} (replaced {} occurrence(s))", filePath, occurrences);
+            return String.format("Successfully edited file: %s (replaced %d occurrence(s))", filePath, occurrences);
+        } catch (Exception e) {
+            logger.error("Error editing file via backend '{}': {}", filePath, e.getMessage(), e);
+            return "Error editing file '" + filePath + "': " + e.getMessage();
+        }
+    }
+
+    /**
+     * 通过 ExecutionBackend 列出目录（沙箱路径）。
+     */
+    private String listFilesViaBackend(ExecutionBackend eb, String path) {
+        try {
+            String dirPath = (path != null && !path.trim().isEmpty()) ? path : ".";
+            List<String> entries = eb.listFiles(dirPath);
+            if (entries.isEmpty()) {
+                return "Directory is empty";
+            }
+            return String.join("\n", entries);
+        } catch (Exception e) {
+            logger.error("Error listing directory via backend '{}': {}", path, e.getMessage(), e);
+            return "Error listing directory '" + path + "': " + e.getMessage();
+        }
+    }
+
+    /**
+     * 通过 ExecutionBackend 按 glob 模式匹配文件（沙箱路径）。
+     */
+    private String globFilesViaBackend(ExecutionBackend eb, String pattern) {
+        try {
+            String baseDir = ".";
+            String globPattern = pattern;
+            int globStart = findGlobStart(pattern);
+            if (globStart > 0) {
+                baseDir = pattern.substring(0, globStart);
+                // 去掉末尾的路径分隔符
+                while (baseDir.endsWith("/") || baseDir.endsWith("\\")) {
+                    baseDir = baseDir.substring(0, baseDir.length() - 1);
+                }
+                if (baseDir.isEmpty()) {
+                    baseDir = ".";
+                }
+                globPattern = pattern.substring(globStart);
+            }
+            List<String> files = eb.globFiles(baseDir, globPattern);
+            if (files.isEmpty()) {
+                return "No files found matching pattern: " + pattern;
+            }
+            return String.join("\n", files);
+        } catch (Exception e) {
+            logger.error("Error globbing files via backend '{}': {}", pattern, e.getMessage(), e);
+            return "Error searching for files: " + e.getMessage();
         }
     }
 
@@ -310,7 +451,13 @@ public class FileSystemTools {
             - filePath='C:\\\\Users\\\\test\\\\data.json', content='{"key": "value"}'""")
     public String writeFile(
             @ToolParam(description = "【必填】要写入的文件路径，必须包含文件名（含扩展名），禁止传空。支持绝对路径或相对路径。例如: 'output.txt'、'./result/data.json'、'D:\\\\files\\\\report.md'") String filePath,
-            @ToolParam(description = "【必填】要写入文件的内容") String content) { // @formatter:on
+            @ToolParam(description = "【必填】要写入文件的内容") String content,
+            ToolContext toolContext) { // @formatter:on
+
+        ExecutionBackend eb = SandboxToolContexts.extract(toolContext);
+        if (eb != null && eb.isSandboxed()) {
+            return writeFileViaBackend(eb, filePath, content);
+        }
 
         if (filePath == null || filePath.trim().isEmpty()) {
             return "Error: filePath 不能为空，必须指定文件名（含扩展名）。例如: 'result.txt'、'./output/report.md'";
@@ -371,7 +518,13 @@ public class FileSystemTools {
             @ToolParam(description = "【必填】要编辑的文件路径，禁止传空。支持绝对路径或相对路径") String filePath,
             @ToolParam(description = "【必填】要被替换的原始文本，必须与文件内容完全匹配（包括缩进）") String oldString,
             @ToolParam(description = "【必填】替换后的新文本，必须与 oldString 不同") String newString,
-            @ToolParam(description = "是否替换所有匹配项（默认 false，仅替换第一个匹配）", required = false) Boolean replaceAll) { // @formatter:on
+            @ToolParam(description = "是否替换所有匹配项（默认 false，仅替换第一个匹配）", required = false) Boolean replaceAll,
+            ToolContext toolContext) { // @formatter:on
+
+        ExecutionBackend eb = SandboxToolContexts.extract(toolContext);
+        if (eb != null && eb.isSandboxed()) {
+            return editFileViaBackend(eb, filePath, oldString, newString, replaceAll);
+        }
 
         try {
             Path resolvedPath = resolvePath(filePath);
@@ -484,7 +637,13 @@ public class FileSystemTools {
             - path='.' 列出当前目录
             - path='./src/main/java' 列出指定目录""")
     public String listFiles(
-            @ToolParam(description = "要列出的目录路径，不传则默认列出当前目录。支持绝对路径或相对路径。例如: '.'、'./src'、'D:\\\\project'") String path) { // @formatter:on
+            @ToolParam(description = "要列出的目录路径，不传则默认列出当前目录。支持绝对路径或相对路径。例如: '.'、'./src'、'D:\\\\project'") String path,
+            ToolContext toolContext) { // @formatter:on
+
+        ExecutionBackend eb = SandboxToolContexts.extract(toolContext);
+        if (eb != null && eb.isSandboxed()) {
+            return listFilesViaBackend(eb, path);
+        }
 
         try {
             Path dirPath = resolvePath(path);
@@ -611,7 +770,13 @@ public class FileSystemTools {
             - './src/**/*.xml' 递归查找 src 目录下所有 XML 文件
             - '**/*Test*.java' 查找文件名包含 Test 的 Java 文件""")
     public String globFiles(
-            @ToolParam(description = "【必填】Glob 匹配模式。例如: '**/*.java'、'*.txt'、'./src/**/*.xml'") String pattern) { // @formatter:on
+            @ToolParam(description = "【必填】Glob 匹配模式。例如: '**/*.java'、'*.txt'、'./src/**/*.xml'") String pattern,
+            ToolContext toolContext) { // @formatter:on
+
+        ExecutionBackend eb = SandboxToolContexts.extract(toolContext);
+        if (eb != null && eb.isSandboxed()) {
+            return globFilesViaBackend(eb, pattern);
+        }
 
         try {
             logger.debug("Globbing files with pattern: {}", pattern);

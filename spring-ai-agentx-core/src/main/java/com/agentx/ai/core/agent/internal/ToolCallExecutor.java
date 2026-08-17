@@ -100,7 +100,7 @@ public class ToolCallExecutor {
 
         Object result;
         try {
-            ToolContext toolContext = buildToolContext(params, sink);
+            ToolContext toolContext = buildToolContext(params, sink, runtimeCtx);
             String effectiveArgs = argsJson;
 
             if (runtimeCtx != null && !hookManager.isEmpty()) {
@@ -382,7 +382,8 @@ public class ToolCallExecutor {
 
     // ==================== 辅助方法 ====================
 
-    private ToolContext buildToolContext(RunnableParams params, Sinks.Many<AgentStreamEvent> sink) {
+    private ToolContext buildToolContext(RunnableParams params, Sinks.Many<AgentStreamEvent> sink,
+                                          AgentRuntimeContext runtimeCtx) {
         Map<String, Object> context = new HashMap<>();
         if (params != null) {
             if (params.getUserId() != null) {
@@ -395,6 +396,16 @@ public class ToolCallExecutor {
         }
         if (sink != null) {
             context.put("eventSink", sink);
+        }
+        if (runtimeCtx != null) {
+            if (runtimeCtx.getExecutionBackend() != null) {
+                context.put(com.agentx.ai.core.sandbox.SandboxToolContexts.EXECUTION_BACKEND_KEY,
+                        runtimeCtx.getExecutionBackend());
+            } else if (runtimeCtx.isSandboxFailed()) {
+                // 严格模式下沙箱获取失败：注入占位后端，拒绝降级到宿主机执行
+                context.put(com.agentx.ai.core.sandbox.SandboxToolContexts.EXECUTION_BACKEND_KEY,
+                        com.agentx.ai.core.sandbox.UnavailableExecutionBackend.INSTANCE);
+            }
         }
         return new ToolContext(context);
     }

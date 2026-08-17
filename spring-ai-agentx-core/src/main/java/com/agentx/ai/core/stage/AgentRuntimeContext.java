@@ -2,6 +2,8 @@ package com.agentx.ai.core.stage;
 
 import com.agentx.ai.core.model.AgentStreamEvent;
 import com.agentx.ai.core.model.RunnableParams;
+import com.agentx.ai.core.sandbox.ExecutionBackend;
+import com.agentx.ai.core.sandbox.Sandbox;
 import com.agentx.ai.core.trace.TraceManager;
 import org.springframework.ai.chat.messages.Message;
 
@@ -41,6 +43,12 @@ public class AgentRuntimeContext {
     private final AtomicBoolean persistedFlag = new AtomicBoolean(false);
 
     /**
+     * AfterCallEvent 触发幂等标志。CAS true 一次后，后续调用直接返回。
+     * 保证 AfterCallEvent（含沙箱释放）在正常/异常/中断/取消所有路径上恰好触发一次。
+     */
+    private final AtomicBoolean afterCallFired = new AtomicBoolean(false);
+
+    /**
      * ReAct 循环的工作消息列表（可变，供 Hook 读取/修改）。
      */
     private List<Message> messages;
@@ -49,6 +57,28 @@ public class AgentRuntimeContext {
      * 下游事件发射器，Hook 可通过它注入 AgentStreamEvent。
      */
     private Consumer<AgentStreamEvent> emitter;
+
+    /**
+     * 沙箱执行后端（由 SandboxHook 在 BeforeCallEvent 注入）。
+     * null 表示未启用沙箱，工具走宿主机路径。
+     */
+    private volatile ExecutionBackend executionBackend;
+
+    /**
+     * 当前调用持有的沙箱句柄（由 SandboxHook 在 BeforeCallEvent 注入、AfterCallEvent 读取并清理）。
+     *
+     * <p>存放在 per-call 上下文中（而非 SandboxHook 实例字段），使同一 ReactAgent 实例
+     * 并发处理多个会话时，各会话的沙箱句柄互不干扰。
+     */
+    private volatile Sandbox activeSandbox;
+
+    /**
+     * 严格模式下沙箱获取失败的标记。
+     *
+     * <p>置位后工具调用注入 {@code UnavailableExecutionBackend}，
+     * 拒绝降级到宿主机执行（fail-closed）。
+     */
+    private volatile boolean sandboxFailed;
 
     public AgentRuntimeContext(String query, RunnableParams params) {
         this.query = query;
@@ -137,6 +167,14 @@ public class AgentRuntimeContext {
         return persistedFlag.compareAndSet(false, true);
     }
 
+    /**
+     * CAS 标记 AfterCallEvent 已触发。返回 true 表示本次调用抢到触发权。
+     * 保证 AfterCallEvent（含沙箱释放）在所有终止路径上恰好触发一次。
+     */
+    public boolean tryFireAfterCall() {
+        return afterCallFired.compareAndSet(false, true);
+    }
+
     public TraceManager getTraceManager() {
         return traceManager;
     }
@@ -201,5 +239,29 @@ public class AgentRuntimeContext {
 
     public void setEmitter(Consumer<AgentStreamEvent> emitter) {
         this.emitter = emitter;
+    }
+
+    public ExecutionBackend getExecutionBackend() {
+        return executionBackend;
+    }
+
+    public void setExecutionBackend(ExecutionBackend executionBackend) {
+        this.executionBackend = executionBackend;
+    }
+
+    public Sandbox getActiveSandbox() {
+        return activeSandbox;
+    }
+
+    public void setActiveSandbox(Sandbox activeSandbox) {
+        this.activeSandbox = activeSandbox;
+    }
+
+    public boolean isSandboxFailed() {
+        return sandboxFailed;
+    }
+
+    public void markSandboxFailed() {
+        this.sandboxFailed = true;
     }
 }
