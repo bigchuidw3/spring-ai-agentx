@@ -15,6 +15,7 @@ import reactor.core.publisher.Sinks;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -112,6 +113,29 @@ public class InterruptContext {
 
     public String getPartialReasoning() {
         return reasoningBuffer != null ? reasoningBuffer.toString() : "";
+    }
+
+    /**
+     * 用户中断时把当前轮已产出的部分正文/思考刷进消息列表，保证纯文本回复也能落库。
+     * 仅 LLM_STREAMING 安全点需要：TOOL_EXECUTION 的 assistant(tool_calls) 已在 finishRound 写入。
+     */
+    public void flushPartialOutput(AgentRuntimeContext runtimeCtx) {
+        if (phase != SafePoint.LLM_STREAMING) {
+            return;
+        }
+        String text = getPartialText();
+        String reasoning = getPartialReasoning();
+        if (text.isEmpty() && reasoning.isEmpty()) {
+            return;
+        }
+        AssistantMessage partial = AssistantMessage.builder()
+                .content(text)
+                .properties(Map.of("reasoningContent", reasoning))
+                .build();
+        messagesRef.add(partial);
+        if (runtimeCtx != null) {
+            runtimeCtx.appendOriginalMessage(partial);
+        }
     }
 
     /**

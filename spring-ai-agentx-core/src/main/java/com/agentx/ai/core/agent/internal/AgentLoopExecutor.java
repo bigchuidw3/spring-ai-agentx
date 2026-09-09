@@ -615,6 +615,8 @@ public class AgentLoopExecutor {
         this.interruptContext = new InterruptContext(messages, sink, params, query);
         if (taskManager != null && conversationId != null) {
             taskManager.setInterruptHandler(conversationId, msg -> {
+                // 中断前把本轮部分回复刷进 messages，纯文本（无工具调用）回复也能落库
+                interruptContext.flushPartialOutput(execCtx);
                 PauseState snapshot = interruptContext.buildSnapshot(msg, execCtx, roundCounter.get());
                 sessionPersister.persistPauseState(snapshot);
                 // 标记中断态并显式落库后再发射 Paused + complete sink，避免 doFinally 时序竞态
