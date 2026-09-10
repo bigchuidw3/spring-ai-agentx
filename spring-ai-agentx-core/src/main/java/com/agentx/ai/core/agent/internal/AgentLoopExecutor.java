@@ -798,6 +798,11 @@ public class AgentLoopExecutor {
         // 校验并修复不合法的 tool call arguments，防止后续 API 调用 400
         List<AssistantMessage.ToolCall> safeToolCalls = toolCallExecutor.sanitizeToolCalls(state.toolCalls);
 
+        // 先标记工具阶段并缓存工具清单：tool_calls 入链后任意时刻中断，快照都能表达待执行状态
+        if (interruptContext != null) {
+            interruptContext.enterToolExecution(safeToolCalls);
+        }
+
         // tool call 路径：构建 AssistantMessage 时携带 reasoningContent（通过 properties 传递）
         Map<String, Object> props = thinkingModeProcessor.buildReasoningProperties(state);
         AssistantMessage assistantMsg = AssistantMessage.builder()
@@ -856,11 +861,6 @@ public class AgentLoopExecutor {
         // 记录 trace（工具调用轮）
         sessionPersister.recordTrace(execCtx, round, requestJson, sessionPersister.serializeToolCalls(safeToolCalls), null,
                 state.promptTokens, state.completionTokens, durationMs);
-
-        // 进入工具执行阶段：可被中断，pendingToolCalls 含正在执行的工具调用
-        if (interruptContext != null) {
-            interruptContext.enterToolExecution(safeToolCalls);
-        }
 
         toolCallExecutor.executeToolCallsAsync(sink, safeToolCalls, messages, params, execCtx, () -> {
             scheduleRound(messages, sink, roundCounter, params, execCtx, query);
