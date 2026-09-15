@@ -38,10 +38,12 @@
         <agent-utils.version>0.7.0</agent-utils.version>
         <graalvm.version>23.1.0</graalvm.version>
         <mybatis-plus.version>3.5.12</mybatis-plus.version>
+        <tika.version>2.9.2</tika.version>
     </properties>
 
     <modules>
         <module>spring-ai-agentx-core</module>
+        <module>spring-ai-agentx-rag</module>
         <module>spring-ai-agentx-samples</module>
     </modules>
 

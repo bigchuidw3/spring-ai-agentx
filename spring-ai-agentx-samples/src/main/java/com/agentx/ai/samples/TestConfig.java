@@ -22,6 +22,7 @@ import org.springframework.ai.zhipuai.ZhiPuAiChatOptions;
 import org.springframework.ai.zhipuai.api.ZhiPuAiApi;
 import org.springframework.ai.vectorstore.pgvector.PgVectorStore;
 import org.springframework.http.client.ReactorClientHttpRequestFactory;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
@@ -55,6 +56,10 @@ public final class TestConfig {
     private static String s(String key) { return secrets.getProperty(key); }
     private static String s(String key, String defaultValue) { return secrets.getProperty(key, defaultValue); }
     private static int si(String key, int defaultValue) { return Integer.parseInt(s(key, String.valueOf(defaultValue))); }
+
+    public static String secret(String key) {
+        return s(key);
+    }
 
     // ===== 公开常量（用于测试打印）=====
     public static final String CHAT_MODEL = s("dashscope.chat.model", "qwen-plus");
@@ -129,6 +134,25 @@ public final class TestConfig {
                         .build())
                 .defaultOptions(opts)
                 .retryTemplate(noRetryTemplate)
+                .build();
+    }
+
+    public static ChatModel createMultimodalChatModel() {
+        OpenAiChatOptions opts = new OpenAiChatOptions();
+        opts.setModel(s("multimodal.model", "qwen-vl-plus"));
+        opts.setTemperature(0.2);
+
+        SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
+        requestFactory.setConnectTimeout(Duration.ofSeconds(10));
+        requestFactory.setReadTimeout(HTTP_TIMEOUT);
+
+        return OpenAiChatModel.builder()
+                .openAiApi(OpenAiApi.builder()
+                        .baseUrl(s("dashscope.base.url", "https://dashscope.aliyuncs.com/compatible-mode/"))
+                        .apiKey(s("dashscope.api.key"))
+                        .restClientBuilder(RestClient.builder().requestFactory(requestFactory))
+                        .build())
+                .defaultOptions(opts)
                 .build();
     }
 
@@ -286,7 +310,7 @@ public final class TestConfig {
     public static DataSource createPgDataSource() {
         HikariDataSource ds = new HikariDataSource();
         ds.setJdbcUrl(String.format("jdbc:postgresql://%s:%d/%s",
-                s("pg.host", "192.168.11.163"),
+                s("pg.host", "192.168.113.52"),
                 si("pg.port", 5433),
                 s("pg.database", "vector_store")));
         ds.setUsername(s("pg.user", "postgres"));
@@ -296,6 +320,12 @@ public final class TestConfig {
     }
 
     public static PgVectorStore createPgVectorStore(DataSource pgDataSource, EmbeddingModel embeddingModel) {
+        return createPgVectorStore(pgDataSource, embeddingModel,
+                s("pg.table.name", "agentx_long_term_memory"));
+    }
+
+    public static PgVectorStore createPgVectorStore(DataSource pgDataSource, EmbeddingModel embeddingModel,
+                                                    String tableName) {
         JdbcTemplate jdbcTemplate = new JdbcTemplate(pgDataSource);
         PgVectorStore store = PgVectorStore.builder(jdbcTemplate, embeddingModel)
                 .dimensions(1024)
@@ -303,7 +333,7 @@ public final class TestConfig {
                 .indexType(PgVectorStore.PgIndexType.HNSW)
                 .initializeSchema(true)
                 .removeExistingVectorStoreTable(false)
-                .vectorTableName(s("pg.table.name", "agentx_long_term_memory"))
+                .vectorTableName(tableName)
                 .maxDocumentBatchSize(100)
                 .build();
         try {
