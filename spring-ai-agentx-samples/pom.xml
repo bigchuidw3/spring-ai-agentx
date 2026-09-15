@@ -26,6 +26,12 @@
             <version>${project.version}</version>
         </dependency>
 
+        <dependency>
+            <groupId>com.agentx.ai</groupId>
+            <artifactId>spring-ai-agentx-rag</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
         <!-- Spring Boot Starter Web -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -63,6 +69,25 @@
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-pgvector-store</artifactId>
+        </dependency>
+
+        <!-- Spring AI Redis Store (for RedisVectorStore) -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-redis-store</artifactId>
+        </dependency>
+
+        <!-- Spring Boot Starter Data Redis (for StringRedisTemplate, includes Lettuce) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
+        <!-- MinIO (for MinioDocumentAssetStore) -->
+        <dependency>
+            <groupId>io.minio</groupId>
+            <artifactId>minio</artifactId>
+            <version>8.5.1</version>
         </dependency>
 
         <!-- Spring AI OpenAI Starter -->
