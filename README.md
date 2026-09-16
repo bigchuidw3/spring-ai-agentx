@@ -42,6 +42,21 @@ Spring AI AgentX 是一款面向 Java 开发者的 AI Agent 开发框架。框�
 | Hook 生命周期机制 | 7 个 Hook 事件覆盖 Agent 全生命周期，支持 Before* 干预输入和 After* 观测结果，通过 AgentRuntimeContext 操控共享状态 |
 | 沙箱隔离执行 | BashTool / FileSystemTools / GrepTool 在 Docker 容器或本地受限目录中执行；调用结束快照持久化，下次调用自动恢复；支持 CONVERSATION / USER 隔离级别与严格模式 fail-closed |
 
+## RAG 模块
+
+框架另提供与 core 并列的 `spring-ai-agentx-rag` 模块，做成一款「基于 Spring AI 之上的 RAG Harness」，把文档解析、分块、存储、查询增强、检索与编排这些 RAG 运行时能力框架化，让调用方以最小成本接入完整 RAG Pipeline。
+
+| 能力域 | 说明 |
+|--------|------|
+| 文档解析 | Tika（简单文本）+ MinerU（多模态，表格/图片混排） |
+| 文档分块 | 按长度 / 按符号 / 按标题（父子分块） |
+| 存储 | PG / Redis 双向量库 + JDBC / Redis 父块库，按 chunk 角色路由写入 |
+| 查询增强 | 问题压缩 / 改写 / HyDE / 多查询扩展 |
+| 检索与重排 | 向量 / 父子召回 + 可选 rerank 精排 |
+| 编排 | RagPipeline，支持串行 RAG 与 Agentic RAG（RAG 作为工具交给 ReactAgent） |
+
+RAG 模块复用 Spring AI 的 Document / VectorStore / EmbeddingModel / ChatModel 等原生 SPI，不重复造底层脚手架。功能说明与接入方式见 [docs/rag/README.md](docs/rag/README.md)。
+
 ## v1.0.1 相对 v1.0.0-M2 做了哪些调整
 
 v1.0.1 重点是把会话存储模型、上下文压缩、HITL、暂停恢复这一层重新对齐到一套自洽的执行模型上。下面是架构级调整项：
