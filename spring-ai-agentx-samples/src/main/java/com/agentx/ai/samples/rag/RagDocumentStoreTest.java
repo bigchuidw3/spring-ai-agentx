@@ -55,6 +55,8 @@ public class RagDocumentStoreTest {
             case 3 -> testDeleteByDocumentId(sampleFile);
             default -> System.out.println("Unknown test number: " + testNumber);
         }
+        // Lettuce/HikariCP 的非守护线程会阻止 JVM 退出，测试类直接结束进程
+        System.exit(0);
     }
 
     static void testIndexWithDocumentStore(Path sampleFile) throws Exception {

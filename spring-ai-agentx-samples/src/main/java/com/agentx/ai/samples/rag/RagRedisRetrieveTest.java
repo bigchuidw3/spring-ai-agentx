@@ -19,6 +19,7 @@ import com.agentx.ai.rag.retrieve.reranker.HttpReranker;
 import com.agentx.ai.rag.splitter.HeadingSplitter;
 import com.agentx.ai.rag.store.RagDocumentStore;
 import com.agentx.ai.rag.store.RedisDocumentStore;
+import com.agentx.ai.rag.store.RedisVectorStores;
 import com.agentx.ai.samples.TestConfig;
 import io.minio.MinioClient;
 import org.springframework.ai.chat.model.ChatModel;
@@ -26,12 +27,15 @@ import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.ai.vectorstore.filter.Filter;
 import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
+import org.springframework.ai.vectorstore.redis.RedisVectorStore;
 import org.springframework.data.redis.connection.RedisPassword;
 import org.springframework.data.redis.connection.RedisStandaloneConfiguration;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import redis.clients.jedis.DefaultJedisClientConfig;
+import redis.clients.jedis.HostAndPort;
+import redis.clients.jedis.JedisPooled;
 
-import javax.sql.DataSource;
 import java.io.FileDescriptor;
 import java.io.FileOutputStream;
 import java.io.PrintStream;
@@ -41,20 +45,18 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * RAG 完整链路测试（PG 向量库）：MinerU 多模态解析 → 父子分块 → 持久化 → 内置 Pipeline 检索。
+ * RAG 完整链路测试（Redis 向量库）：MinerU 多模态解析 → 父子分块 → 持久化 → 内置 Pipeline 检索。
  *
- * 向量库为 PgVectorStore，父块存 Redis。需要配置 MINERU_API_TOKEN 环境变量
+ * 向量库为 RedisVectorStore，父块也存 Redis。需要配置 MINERU_API_TOKEN 环境变量
  * 或 secrets.properties 的 mineru.api.token。
  * 索引以内容 hash 作 documentId，先删后插幂等，可重复运行。
  *
  * @author bigchui
  */
-public class RagPgRetrieveTest {
+public class RagRedisRetrieveTest {
 
     private static final Path DEFAULT_SAMPLE_FILE = Path.of(
             "D:\\download\\✅Claude Code中如何使用Skills.docx");
-
-    private static final String PG_VECTOR_TABLE = "agentx_rag_vector";
 
     private static final String REDIS_HOST = "192.168.113.52";
     private static final int REDIS_PORT = 6399;
@@ -88,10 +90,10 @@ public class RagPgRetrieveTest {
     }
 
     /**
-     * 建索引：MinerU 解析 → 父子分块 → 持久化（子块进 PG，父块进 Redis，注入 docType）。
+     * 建索引：MinerU 解析 → 父子分块 → 持久化（子块与父块全进 Redis，注入 docType）。
      */
     static void indexDocuments(Path sampleFile) throws Exception {
-        TestConfig.printTestHeader("RAG PG Index");
+        TestConfig.printTestHeader("RAG Redis Index");
 
         // 1. MinerU 多模态解析：图片上传 MinIO，URI 写回 Markdown，VLM 生成图片语义描述
         RawDocument rawDocument = new LocalDocumentReader(sampleFile).read();
@@ -112,10 +114,8 @@ public class RagPgRetrieveTest {
                 .split(sourceDocuments);
         System.out.printf("分块完成：共 %d 个块%n", chunks.size());
 
-        // 3. 持久化：子块向量化进 PG，父块原文存 Redis，统一注入 docType 自定义元数据
-        DataSource pgDataSource = TestConfig.createPgDataSource();
-        VectorStore vectorStore = TestConfig.createPgVectorStore(
-                pgDataSource, TestConfig.createEmbeddingModel(), PG_VECTOR_TABLE);
+        // 3. 持久化：子块向量化 + 父块原文，全进 Redis，统一注入 docType 自定义元数据
+        VectorStore vectorStore = createRedisVectorStore();
         RedisDocumentStore parentStore = new RedisDocumentStore(createStringRedisTemplate());
         RagDocumentStore documentStore = RagDocumentStore.builder()
                 .vectorStore(vectorStore)
@@ -130,19 +130,15 @@ public class RagPgRetrieveTest {
      * 检索问答：组装 Pipeline → 封装成工具注入 ReactAgent → 真实 Agentic RAG 问答。
      */
     static void retrieve(Path sampleFile) throws Exception {
-        TestConfig.printTestHeader("RAG PG Retrieve");
+        TestConfig.printTestHeader("RAG Redis Retrieve");
 
-        DataSource pgDataSource = TestConfig.createPgDataSource();
-        VectorStore vectorStore = TestConfig.createPgVectorStore(
-                pgDataSource, TestConfig.createEmbeddingModel(), PG_VECTOR_TABLE);
+        VectorStore vectorStore = createRedisVectorStore();
         RedisDocumentStore parentStore = new RedisDocumentStore(createStringRedisTemplate());
 
-        // 组装内置 Pipeline：全量查询增强（压缩 → 改写 → HyDE + 多查询扩展）→ 父子检索
+        // 组装内置 Pipeline：全量查询增强（压缩 → HyDE + 多查询扩展）→ 父子检索
         ChatModel queryChatModel = TestConfig.createChatModel();
         FilterExpressionBuilder fb = new FilterExpressionBuilder();
-        Filter.Expression filter = fb.and(
-                fb.eq(DOC_TYPE, DOC_TYPE_VALUE),
-                fb.eq(MetadataKeys.FILE_NAME, "✅Claude Code中如何使用Skills.docx")).build();
+        Filter.Expression filter = fb.eq(DOC_TYPE, DOC_TYPE_VALUE).build();
 
         RagPipeline pipeline = DefaultRagPipeline.builder()
                 .queryTransformer(QueryTransformers.compression(queryChatModel))
@@ -160,6 +156,9 @@ public class RagPgRetrieveTest {
                         TestConfig.secret("dashscope.api.key"), "qwen3.7-text-rerank", 3,
                         HttpReranker.RequestFormat.DASHSCOPE))
                 .build();
+
+        List<Document> documents = pipeline.retrieve("如何创建一个 Skill？",List.of());
+//        System.out.println(documents);
 
         // 封装成工具注入 ReactAgent，真实走一遍 Agentic RAG 问答
         ReactAgent agent = ReactAgent.builder()
@@ -182,6 +181,18 @@ public class RagPgRetrieveTest {
                 .doOnNext(TestConfig::printEvent)
                 .doOnError(e -> System.err.println("Stream Error: " + e.getMessage()))
                 .blockLast();
+    }
+
+    private static RedisVectorStore createRedisVectorStore() {
+        DefaultJedisClientConfig jedisConfig = DefaultJedisClientConfig.builder()
+                .password(REDIS_PASSWORD)
+                .connectionTimeoutMillis(10000)
+                .socketTimeoutMillis(10000)
+                .build();
+        JedisPooled jedis = new JedisPooled(new HostAndPort(REDIS_HOST, REDIS_PORT), jedisConfig);
+        return RedisVectorStores.create(jedis, TestConfig.createEmbeddingModel(),
+                RedisVectorStores.DEFAULT_INDEX_NAME, RedisVectorStores.DEFAULT_PREFIX,
+                RedisVectorStore.MetadataField.tag(DOC_TYPE));
     }
 
     private static StringRedisTemplate createStringRedisTemplate() {

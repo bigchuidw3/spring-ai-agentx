@@ -21,31 +21,49 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * 基于 HTTP 调用的重排器。
+ * 基于 HTTP 调用的通用重排器。
  *
- * 请求格式兼容 Jina/Cohere 风格的 rerank API：{model, query, documents, top_n}，
- * 响应解析 {results: [{index, relevance_score}]}，按相关性分数降序取 topK。
+ * 通过 baseUrl 接入任意 rerank 服务，用 requestFormat 适配不同请求体格式。
+ * 响应兼容 results 与 output.results 两种结构，按相关性分数降序取 topK。
  *
  * @author bigchui
  */
 public final class HttpReranker implements Reranker {
 
-    private final String url;
+    /**
+     * 请求体格式。
+     */
+    public enum RequestFormat {
+
+        /**
+         * 平铺格式：{model, query, documents, top_n}，Jina / Cohere / OpenAI 兼容。
+         */
+        FLAT,
+
+        /**
+         * 嵌套格式：{model, input: {query, documents}, parameters: {top_n}}，DashScope。
+         */
+        DASHSCOPE
+    }
+
+    private final String baseUrl;
     private final String apiKey;
     private final String model;
     private final int topK;
+    private final RequestFormat requestFormat;
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
 
-    public HttpReranker(String url, String apiKey, String model) {
-        this(url, apiKey, model, 3);
+    public HttpReranker(String baseUrl, String apiKey, String model, int topK) {
+        this(baseUrl, apiKey, model, topK, RequestFormat.FLAT);
     }
 
-    public HttpReranker(String url, String apiKey, String model, int topK) {
-        this.url = Objects.requireNonNull(url, "url");
+    public HttpReranker(String baseUrl, String apiKey, String model, int topK, RequestFormat requestFormat) {
+        this.baseUrl = Objects.requireNonNull(baseUrl, "baseUrl");
         this.apiKey = apiKey == null ? "" : apiKey;
         this.model = Objects.requireNonNull(model, "model");
         this.topK = topK;
+        this.requestFormat = Objects.requireNonNull(requestFormat, "requestFormat");
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
@@ -58,16 +76,9 @@ public final class HttpReranker implements Reranker {
             return List.of();
         }
 
-        ObjectNode body = objectMapper.createObjectNode();
-        body.put("model", model);
-        body.put("query", query);
-        ArrayNode documents = body.putArray("documents");
-        for (Document doc : candidates) {
-            documents.add(doc.getText());
-        }
-        body.put("top_n", topK);
+        ObjectNode body = buildBody(query, candidates);
 
-        HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(url))
+        HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(baseUrl))
                 .timeout(Duration.ofSeconds(30))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofByteArray(toBytes(body)));
@@ -90,9 +101,34 @@ public final class HttpReranker implements Reranker {
         }
     }
 
+    private ObjectNode buildBody(String query, List<Document> candidates) {
+        ObjectNode body = objectMapper.createObjectNode();
+        body.put("model", model);
+        if (requestFormat == RequestFormat.DASHSCOPE) {
+            ObjectNode input = body.putObject("input");
+            input.put("query", query);
+            ArrayNode documents = input.putArray("documents");
+            for (Document doc : candidates) {
+                documents.add(doc.getText());
+            }
+            body.putObject("parameters").put("top_n", topK);
+        } else {
+            body.put("query", query);
+            ArrayNode documents = body.putArray("documents");
+            for (Document doc : candidates) {
+                documents.add(doc.getText());
+            }
+            body.put("top_n", topK);
+        }
+        return body;
+    }
+
     private List<Document> parse(byte[] body, List<Document> candidates) throws IOException {
         JsonNode root = objectMapper.readTree(body);
         JsonNode results = root.path("results");
+        if (results.isMissingNode() || !results.isArray()) {
+            results = root.path("output").path("results");
+        }
         List<RankedResult> ranked = new ArrayList<>();
         for (JsonNode result : results) {
             int index = result.path("index").asInt(-1);
