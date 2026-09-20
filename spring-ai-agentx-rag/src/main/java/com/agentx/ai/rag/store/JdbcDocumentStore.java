@@ -6,8 +6,7 @@ import com.agentx.ai.rag.exception.RagException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.document.Document;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -26,9 +25,8 @@ import java.util.regex.Pattern;
  *
  * @author bigchui
  */
+@Slf4j
 public final class JdbcDocumentStore implements DocumentStore {
-
-    private static final Logger log = LoggerFactory.getLogger(JdbcDocumentStore.class);
 
     private static final String DEFAULT_TABLE_NAME = "agentx_rag_document";
 

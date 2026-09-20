@@ -7,7 +7,9 @@ import com.agentx.ai.rag.common.UuidChunkIdGenerator;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
@@ -40,6 +42,7 @@ public class RecursiveSplitter extends AbstractDocumentSplitter {
     );
 
     private final List<String> separators;
+    private final Map<String, Pattern> regexPatternCache = new ConcurrentHashMap<>();
 
     private RecursiveSplitter(Builder builder) {
         super(builder.chunkSize, builder.overlap, builder.chunkIdGenerator,
@@ -144,7 +147,8 @@ public class RecursiveSplitter extends AbstractDocumentSplitter {
         if (separator.startsWith(REGEX_PREFIX)) {
             String expression = separator.substring(REGEX_PREFIX.length());
             try {
-                Matcher matcher = Pattern.compile(expression).matcher(text);
+                Pattern pattern = regexPatternCache.computeIfAbsent(expression, Pattern::compile);
+                Matcher matcher = pattern.matcher(text);
                 int start = 0;
                 while (matcher.find()) {
                     if (matcher.end() > start) {

@@ -12,6 +12,7 @@ import com.agentx.ai.rag.parser.image.ImageDescription;
 import com.agentx.ai.rag.parser.image.ImageDescriptionRequest;
 import com.agentx.ai.rag.parser.image.ImageDescriber;
 import com.agentx.ai.rag.parser.image.ImageMediaTypes;
+import lombok.extern.slf4j.Slf4j;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -32,6 +33,7 @@ import java.util.concurrent.Semaphore;
  *
  * @author bigchui
  */
+@Slf4j
 final class MineruImagePostProcessor {
 
     private final DocumentAssetStore assetStore;
@@ -49,6 +51,8 @@ final class MineruImagePostProcessor {
     ParsedDocument process(String assetScope, ParsedDocument document) {
         Objects.requireNonNull(document, "document");
         Objects.requireNonNull(assetScope, "assetScope");
+        log.debug("MinerU 图片后处理开始: blocks={}, imageUnderstanding={}",
+                document.blocks().size(), imageDescriber != null);
 
         Map<String, ProcessedImage> images = new LinkedHashMap<>();
         List<ParsedBlock> blocks = new ArrayList<>(document.blocks().size());
@@ -88,6 +92,7 @@ final class MineruImagePostProcessor {
         }
 
         List<ParsedBlock> rewrittenBlocks = rewriteMarkdownImages(blocks, images);
+        log.debug("MinerU 图片后处理完成: processedImages={}", processedImages.size());
         return new ParsedDocument(
                 document.fileName(),
                 rewrittenBlocks,

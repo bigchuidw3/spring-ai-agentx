@@ -37,18 +37,25 @@ public final class HeadingSplitter extends TextSplitter {
 
     private final int maxHeadingLevel;
     private final int chunkSize;
+    private final int maxParentSize;
     private final boolean enableParentChild;
     private final boolean stripHeadings;
     private final ChunkIdGenerator chunkIdGenerator;
     private final RecursiveSplitter childSplitter;
+    private final RecursiveSplitter parentSplitter;
 
     private HeadingSplitter(Builder builder) {
         if (builder.maxHeadingLevel < 1 || builder.maxHeadingLevel > 6) {
             throw new RagException(RagErrorCode.SPLIT_CONFIG_INVALID,
                     "maxHeadingLevel 必须在 1 到 6 之间: " + builder.maxHeadingLevel);
         }
+        if (builder.maxParentSize < 0) {
+            throw new RagException(RagErrorCode.SPLIT_CONFIG_INVALID,
+                    "maxParentSize 不能为负数: " + builder.maxParentSize);
+        }
         this.maxHeadingLevel = builder.maxHeadingLevel;
         this.chunkSize = builder.chunkSize;
+        this.maxParentSize = builder.maxParentSize;
         this.enableParentChild = builder.enableParentChild;
         this.stripHeadings = builder.stripHeadings;
         this.chunkIdGenerator = builder.chunkIdGenerator == null
@@ -62,6 +69,16 @@ public final class HeadingSplitter extends TextSplitter {
                 .separators(builder.separators)
                 .chunkIdGenerator(chunkIdGenerator)
                 .build();
+        this.parentSplitter = builder.maxParentSize > 0
+                ? RecursiveSplitter.builder()
+                        .chunkSize(builder.maxParentSize)
+                        .overlap(0)
+                        .preserveImageRef(builder.preserveImageRef)
+                        .preserveTableRef(builder.preserveTableRef)
+                        .separators(builder.separators)
+                        .chunkIdGenerator(chunkIdGenerator)
+                        .build()
+                : null;
     }
 
     public static Builder builder() {
@@ -128,29 +145,53 @@ public final class HeadingSplitter extends TextSplitter {
             sectionMetadata.put(MetadataKeys.HEADING_PATH, section.headingPath());
         }
 
-        Document.Builder sectionBuilder = Document.builder()
-                .id(chunkIdGenerator.nextId())
-                .text(sectionText)
-                .metadata(new LinkedHashMap<>(sectionMetadata));
-        if (score != null) {
-            sectionBuilder.score(score);
-        }
-        List<Document> children = childSplitter.split(sectionBuilder.build());
-        if (children.isEmpty()) {
-            return List.of();
-        }
         if (!enableParentChild) {
-            return children;
+            return childSplitter.split(sectionDoc(sectionText, sectionMetadata, score));
         }
 
+        // 父块超限：先按 maxParentSize 切成多个子父块，再对每个子父块切子块，避免无界父块
+        if (maxParentSize > 0 && sectionText.length() > maxParentSize) {
+            return splitOversizedSection(sectionText, sectionMetadata, score);
+        }
+
+        return buildParentAndChildren(sectionText, sectionMetadata, score);
+    }
+
+    private List<Document> splitOversizedSection(String sectionText, Map<String, Object> sectionMetadata,
+                                                 Double score) {
+        List<Document> subParents = parentSplitter.split(sectionDoc(sectionText, sectionMetadata, score));
+        List<Document> result = new ArrayList<>();
+        for (Document subParent : subParents) {
+            String subText = subParent.getText();
+            if (!subText.isBlank()) {
+                result.addAll(buildParentAndChildren(subText, sectionMetadata, score));
+            }
+        }
+        return result;
+    }
+
+    private Document sectionDoc(String text, Map<String, Object> sectionMetadata, Double score) {
+        Document.Builder builder = Document.builder()
+                .id(chunkIdGenerator.nextId())
+                .text(text)
+                .metadata(new LinkedHashMap<>(sectionMetadata));
+        if (score != null) {
+            builder.score(score);
+        }
+        return builder.build();
+    }
+
+    private List<Document> buildParentAndChildren(String parentText, Map<String, Object> sectionMetadata,
+                                                  Double score) {
         String parentChunkId = chunkIdGenerator.nextId();
         Map<String, Object> parentMetadata = new LinkedHashMap<>(sectionMetadata);
         parentMetadata.put(MetadataKeys.CHUNK_ID, parentChunkId);
         parentMetadata.put(MetadataKeys.CHUNK_ROLE, ChunkRole.PARENT.code());
         parentMetadata.put(MetadataKeys.SKIP_EMBEDDING, 1);
 
+        List<Document> children = childSplitter.split(sectionDoc(parentText, sectionMetadata, score));
         List<Document> result = new ArrayList<>(children.size() + 1);
-        result.add(buildDocument(sectionText, parentChunkId, parentMetadata, score));
+        result.add(buildDocument(parentText, parentChunkId, parentMetadata, score));
         for (Document child : children) {
             result.add(markChildChunk(child, parentChunkId));
         }
@@ -195,7 +236,7 @@ public final class HeadingSplitter extends TextSplitter {
         boolean inCodeBlock = false;
         String codeFence = "";
 
-        for (String line : text.lines().toList()) {
+        for (String line : (Iterable<String>) text.lines()::iterator) {
             String trimmed = line.trim();
             if (!inCodeBlock && (trimmed.startsWith("```") || trimmed.startsWith("~~~"))) {
                 inCodeBlock = true;
@@ -308,6 +349,7 @@ public final class HeadingSplitter extends TextSplitter {
         private boolean enableParentChild;
         private boolean stripHeadings;
         private int chunkSize = AbstractDocumentSplitter.DEFAULT_CHUNK_SIZE;
+        private int maxParentSize = 0;
         private int overlap = AbstractDocumentSplitter.DEFAULT_OVERLAP;
         private boolean preserveImageRef = true;
         private boolean preserveTableRef = true;
@@ -331,6 +373,14 @@ public final class HeadingSplitter extends TextSplitter {
 
         public Builder chunkSize(int chunkSize) {
             this.chunkSize = chunkSize;
+            return this;
+        }
+
+        /**
+         * 父块最大字符数，超过则拆成多个子父块；0 表示不限制。
+         */
+        public Builder maxParentSize(int maxParentSize) {
+            this.maxParentSize = maxParentSize;
             return this;
         }
 

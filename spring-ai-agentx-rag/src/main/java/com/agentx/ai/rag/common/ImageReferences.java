@@ -18,13 +18,17 @@ import java.util.regex.Pattern;
 public final class ImageReferences {
 
     private static final Pattern REFERENCE_PATTERN = Pattern.compile(
-            "!\\[(?<alt>(?:\\\\.|[^\\]\\r\\n])*)\\]\\(\\s*(?:<(?<angle>[^>\\r\\n]+)>|(?<plain>[^\\s)]+))"
+            "!\\[(?<alt>(?:\\\\.|[^\\]\\r\\n])*+)\\]\\(\\s*(?:<(?<angle>[^>\\r\\n]+)>|(?<plain>[^\\s)]+))"
                     + "(?:\\s+(?:\"[^\"\\r\\n]*\"|'[^'\\r\\n]*'|\\([^)\\r\\n]*\\)))?\\s*\\)"
                     + "|<img\\b[^>\\r\\n]*>",
             Pattern.CASE_INSENSITIVE);
 
     private static final Pattern HTML_SOURCE_PATTERN = Pattern.compile(
             "\\bsrc\\s*=\\s*(?:\"(?<double>[^\"]+)\"|'(?<single>[^']+)'|(?<bare>[^\\s>]+))",
+            Pattern.CASE_INSENSITIVE);
+
+    private static final Pattern HTML_ALT_PATTERN = Pattern.compile(
+            "\\balt\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))",
             Pattern.CASE_INSENSITIVE);
 
     private ImageReferences() {
@@ -99,9 +103,7 @@ public final class ImageReferences {
             return matcher.group("alt");
         }
 
-        Matcher altMatcher = Pattern.compile(
-                "\\balt\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))",
-                Pattern.CASE_INSENSITIVE).matcher(token);
+        Matcher altMatcher = HTML_ALT_PATTERN.matcher(token);
         if (!altMatcher.find()) {
             return "";
         }
