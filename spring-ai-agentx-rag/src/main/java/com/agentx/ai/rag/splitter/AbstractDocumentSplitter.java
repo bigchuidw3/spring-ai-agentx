@@ -179,20 +179,27 @@ public abstract class AbstractDocumentSplitter extends TextSplitter {
     }
 
     private static List<String> splitCodePoints(String text, int chunkSize, int overlap) {
-        int[] codePoints = text.codePoints().toArray();
         List<String> chunks = new ArrayList<>();
-        int start = 0;
-        while (start < codePoints.length) {
-            int end = Math.min(codePoints.length, start + chunkSize);
-            chunks.add(new String(codePoints, start, end - start));
-            if (end >= codePoints.length) {
-                break;
+        int length = text.length();
+        int chunkStart = 0;
+        int codePoints = 0;
+        int i = 0;
+        while (i < length) {
+            i += Character.charCount(text.codePointAt(i));
+            codePoints++;
+            if (codePoints == chunkSize || i >= length) {
+                chunks.add(text.substring(chunkStart, i));
+                if (i >= length) {
+                    break;
+                }
+                int next = i;
+                for (int b = 0; b < overlap; b++) {
+                    next -= Character.charCount(text.codePointBefore(next));
+                }
+                chunkStart = next;
+                i = next;
+                codePoints = 0;
             }
-            int next = end - overlap;
-            if (next <= start) {
-                next = start + 1;
-            }
-            start = next;
         }
         return chunks;
     }

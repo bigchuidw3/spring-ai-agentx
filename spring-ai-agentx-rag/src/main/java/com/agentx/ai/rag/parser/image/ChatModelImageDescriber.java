@@ -2,6 +2,7 @@ package com.agentx.ai.rag.parser.image;
 
 import com.agentx.ai.rag.exception.RagErrorCode;
 import com.agentx.ai.rag.exception.RagException;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.prompt.ChatOptions;
@@ -22,6 +23,7 @@ import java.util.Objects;
  *
  * @author bigchui
  */
+@Slf4j
 public final class ChatModelImageDescriber implements ImageDescriber {
 
     private final ChatModel chatModel;
@@ -35,6 +37,8 @@ public final class ChatModelImageDescriber implements ImageDescriber {
     @Override
     public ImageDescription describe(ImageDescriptionRequest request) {
         Objects.requireNonNull(request, "request");
+        log.debug("图片语义理解开始: image={}, model={}, bytes={}",
+                request.imageFileName(), modelName, request.image() == null ? 0 : request.image().length);
         try {
             MimeType mimeType = MimeTypeUtils.parseMimeType(request.mediaType());
             Media media = new Media(mimeType, new ByteArrayResource(request.image()));
@@ -51,10 +55,13 @@ public final class ChatModelImageDescriber implements ImageDescriber {
                 throw new RagException(RagErrorCode.IMAGE_UNDERSTANDING_FAILED,
                         "图片语义描述为空: " + request.imageFileName());
             }
+            log.debug("图片语义理解完成: image={}, descLen={}", request.imageFileName(), text.length());
             return new ImageDescription(normalize(text), modelName);
         } catch (RagException e) {
+            log.warn("图片语义理解失败: image={}, err={}", request.imageFileName(), e.getMessage());
             throw e;
         } catch (Exception e) {
+            log.warn("图片语义理解异常: image={}, err={}", request.imageFileName(), e.getMessage());
             throw new RagException(RagErrorCode.IMAGE_UNDERSTANDING_FAILED,
                     "图片语义理解失败: " + request.imageFileName(), e);
         }

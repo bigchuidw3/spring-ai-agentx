@@ -5,6 +5,7 @@ import com.agentx.ai.rag.exception.RagException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
 import java.net.URI;
@@ -21,6 +22,7 @@ import java.util.Objects;
  *
  * @author bigchui
  */
+@Slf4j
 final class MineruClient {
 
     private static final String APPLY_UPLOAD_URL_PATH = "api/v4/file-urls/batch";
@@ -37,11 +39,15 @@ final class MineruClient {
     MineruParseResult parse(byte[] content, String fileName, String dataId) {
         Objects.requireNonNull(content, "content");
         Objects.requireNonNull(fileName, "fileName");
+        log.debug("MinerU 解析开始: fileName={}, size={}", fileName, content.length);
 
         UploadTarget target = applyUploadUrl(fileName, dataId);
+        log.debug("MinerU 上传地址已申请: batchId={}", target.batchId());
         upload(target.uploadUrl(), content);
+        log.debug("MinerU 文件已上传: batchId={}", target.batchId());
         JsonNode result = waitForResult(target.batchId());
         String state = text(result, "state");
+        log.debug("MinerU 任务状态: batchId={}, state={}", target.batchId(), state);
         if (!"done".equals(state)) {
             throw apiError("MinerU 任务未完成，state=" + state);
         }
@@ -50,7 +56,9 @@ final class MineruClient {
         if (resultUrl.isBlank()) {
             throw apiError("MinerU 任务完成但缺少 full_zip_url");
         }
-        return new MineruParseResult(target.batchId(), download(resultUrl));
+        byte[] zip = download(resultUrl);
+        log.debug("MinerU 结果已下载: batchId={}, zipSize={}", target.batchId(), zip.length);
+        return new MineruParseResult(target.batchId(), zip);
     }
 
     private UploadTarget applyUploadUrl(String fileName, String dataId) {

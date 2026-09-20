@@ -7,6 +7,7 @@ import com.agentx.ai.rag.exception.RagErrorCode;
 import com.agentx.ai.rag.exception.RagException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.extern.slf4j.Slf4j;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -29,6 +30,7 @@ import java.util.zip.ZipInputStream;
  *
  * @author bigchui
  */
+@Slf4j
 final class MineruResultParser {
 
     private static final Set<String> IMAGE_EXTENSIONS = Set.of(
@@ -42,13 +44,18 @@ final class MineruResultParser {
 
     List<ParsedBlock> parse(byte[] zipContent) {
         Objects.requireNonNull(zipContent, "zipContent");
+        log.debug("MinerU 结果解析开始: zipSize={}", zipContent.length);
         Map<String, byte[]> entries = readZipEntries(zipContent);
+        log.debug("MinerU 结果解压完成: entries={}", entries.size());
 
         String markdown = readMarkdown(entries);
         JsonNode contentList = readContentList(entries);
         List<ParsedBlock> blocks = new ArrayList<>();
         blocks.add(ParsedBlock.text(markdown));
-        blocks.addAll(readImageBlocks(entries, contentList));
+        List<ParsedBlock> images = readImageBlocks(entries, contentList);
+        blocks.addAll(images);
+        log.debug("MinerU 结果解析完成: markdownLen={}, imageBlocks={}",
+                markdown == null ? 0 : markdown.length(), images.size());
         return blocks;
     }
 
