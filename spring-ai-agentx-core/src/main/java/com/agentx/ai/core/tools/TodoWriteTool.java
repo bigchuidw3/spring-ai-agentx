@@ -104,7 +104,7 @@ public class TodoWriteTool {
 	// ==================== 数据模型 ====================
 
 	public record TodoItem(
-			@ToolParam(description = "任务内容，祈使形式（如\"运行测试\"）") String content,
+			@ToolParam(description = "任务内容，起始形式（如\"运行测试\"）") String content,
 			@ToolParam(description = "任务状态：pending（未开始）、in_progress（执行中）、completed（已完成）") Status status,
 			@ToolParam(description = "执行时显示的现在进行时形式（如\"正在运行测试\"）") String activeForm) {
 	}
