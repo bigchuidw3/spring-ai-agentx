@@ -285,9 +285,9 @@ public class DeepSeekV4ChatModel implements ChatModel {
 					String accumulatedReasoningContent = reasoningContentMap.getOrDefault(responseId, null);
 					if (accumulatedReasoningContent != null && !accumulatedReasoningContent.isEmpty()) {
 						List<Generation> newGenerations = response.getResults().stream().map(gen -> {
-							if (gen.getOutput() instanceof org.springframework.ai.deepseek.DeepSeekAssistantMessage deepSeekMsg
+							if (gen.getOutput() instanceof DeepSeekAssistantMessage deepSeekMsg
 									&& (deepSeekMsg.getReasoningContent() == null || deepSeekMsg.getReasoningContent().isEmpty())) {
-								org.springframework.ai.deepseek.DeepSeekAssistantMessage newMsg = new org.springframework.ai.deepseek.DeepSeekAssistantMessage.Builder()
+								DeepSeekAssistantMessage newMsg = new DeepSeekAssistantMessage.Builder()
 									.content(deepSeekMsg.getText())
 									.reasoningContent(accumulatedReasoningContent)
 									.properties(deepSeekMsg.getMetadata() != null ? deepSeekMsg.getMetadata() : Map.of())
@@ -355,8 +355,8 @@ public class DeepSeekV4ChatModel implements ChatModel {
 		String textContent = choice.message().content();
 		String reasoningContent = choice.message().reasoningContent();
 
-		org.springframework.ai.deepseek.DeepSeekAssistantMessage.Builder builder = new org.springframework.ai.deepseek.DeepSeekAssistantMessage.Builder();
-		org.springframework.ai.deepseek.DeepSeekAssistantMessage assistantMessage = builder.content(textContent)
+		DeepSeekAssistantMessage.Builder builder = new DeepSeekAssistantMessage.Builder();
+		DeepSeekAssistantMessage assistantMessage = builder.content(textContent)
 			.reasoningContent(reasoningContent)
 			.properties(metadata)
 			.toolCalls(toolCalls)
@@ -463,8 +463,8 @@ public class DeepSeekV4ChatModel implements ChatModel {
 					}).toList();
 				}
 				Boolean isPrefixAssistantMessage = null;
-				if (message instanceof org.springframework.ai.deepseek.DeepSeekAssistantMessage
-						&& Boolean.TRUE.equals(((org.springframework.ai.deepseek.DeepSeekAssistantMessage) message).getPrefix())) {
+				if (message instanceof DeepSeekAssistantMessage
+						&& Boolean.TRUE.equals(((DeepSeekAssistantMessage) message).getPrefix())) {
 					isPrefixAssistantMessage = true;
 				}
 				// tool call 场景下 text 可能为 null（如 DeepSeek thinking 模式）

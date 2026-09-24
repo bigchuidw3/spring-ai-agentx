@@ -40,7 +40,8 @@ Spring AI AgentX 是一款面向 Java 开发者的 AI Agent 开发框架。框�
 | 思考模型适配 | 支持 `<think/>` 标签和 `reasoning_content` 两种思考输出格式，内置 `DeepSeekV4ChatModel` 兼容修复 |
 | 异常处理与重试 | 内置透明重试机制，统一异常处理（AgentException + AgentErrorCode） |
 | Hook 生命周期机制 | 7 个 Hook 事件覆盖 Agent 全生命周期，支持 Before* 干预输入和 After* 观测结果，通过 AgentRuntimeContext 操控共享状态 |
-| 沙箱隔离执行 | BashTool / FileSystemTools / GrepTool 在 Docker 容器或本地受限目录中执行；调用结束快照持久化，下次调用自动恢复；支持 CONVERSATION / USER 隔离级别与严格模式 fail-closed |
+| 可观测性 | 基于 OpenTelemetry 标准将 Agent 调用链路输出为 trace 树；`TracingHook` 产出 `agentx` 根/工具 span，`ChatContentObservationHandler` 补齐 LLM span 的 prompt/completion，可对接 Opik / Langfuse / Jaeger 等任意 OTLP 平台 |
+| 沙箱隔离执行 | BashTool / FileSystemTools / GrepTool 在 Docker 容器或本地受限目录中执行；调用结束快照持久化，下次调用自动恢复；支持 CONVERSATION / USER 隔离级别与严格模式 fail-closed（TODO 待修复：容器内无法派生沙箱） |
 
 ## RAG 模块
 
@@ -177,6 +178,10 @@ AgentResult result = agent.callForResult("帮我查一下北京天气，并给�
 | `enableSession` | `agentx_session` 当前会话状态 | `true` | SubAgent 场景会被框架自动关闭 |
 | `enableTrace` | `agentx_trace` 审计日志 | `true` | 父 Agent 关闭时，SubAgent 也不再记录 trace |
 
+## 可观测性
+
+框架基于 OpenTelemetry 标准将 Agent 调用链路输出为完整 trace 树，可对接任意支持 OTLP 协议的观测平台（Opik / Langfuse / Tempo / Jaeger 等）。依赖、接入步骤与排查指引详见 [22-可观测性](docs/core/v1_1/22-可观测性.md)。
+
 ## v1.0.1 文档导航（v1_1）
 
 下列专题在 v1.0.1 中做了调整，对应文档放在 [docs/core/v1_1](docs/core/v1_1) 下：
@@ -190,8 +195,9 @@ AgentResult result = agent.callForResult("帮我查一下北京天气，并给�
 | [19-中断与恢复](docs/core/v1_1/19-中断与恢复.md) | PauseState 持久化、HITL/Interrupt 两种暂停语义与恢复规则 |
 | [20-Hook机制](docs/core/v1_1/20-Hook机制.md) | 7 个生命周期 Hook 事件、AgentRuntimeContext 共享上下文、与 AgentStreamEvent 的关系 |
 | [21-沙箱隔离执行](docs/core/v1_1/21-沙箱隔离执行.md) | 沙箱架构分层、Docker / Local 快速开始、容器生命周期、快照持久化选型、多节点部署方案 |
+| [22-可观测性](docs/core/v1_1/22-可观测性.md) | 基于 OTel 的 trace 输出、TracingHook / ChatContentObservationHandler / ObservabilityPredicates 三组件与调用方接入步骤 |
 
-推荐阅读顺序：05 → 11 → 13 → 19 → 18 → 20 → 21。
+推荐阅读顺序：05 → 11 → 13 → 19 → 18 → 20 → 21 → 22。
 
 ## 其他专题文档（沿用 v1.0.0-M2）
 
@@ -243,6 +249,7 @@ AgentResult result = agent.callForResult("帮我查一下北京天气，并给�
 - 长期记忆：VectorStore 驱动，从 `original_messages` 异步抽取 → 去重合并 → 跨会话注入
 - Hook 生命周期机制：7 个 Hook 事件覆盖全生命周期，Before* 干预输入 / After* 观测结果
 - 沙箱隔离执行：Docker / Local 双后端，快照持久化与自动恢复，严格模式 fail-closed
+- 可观测性：基于 OpenTelemetry 的 trace 输出，TracingHook 产出 Agent 调用链 span，ChatContentObservationHandler 补齐 LLM 内容，OTLP 导出对接 Opik / Langfuse 等平台
 
 ### v1.0.0-M2（历史版本）
 
@@ -274,7 +281,6 @@ AgentResult result = agent.callForResult("帮我查一下北京天气，并给�
 
 - Plan & Execute 架构
 - Agent Teams
-- 可观测性体系
 
 ## License
 

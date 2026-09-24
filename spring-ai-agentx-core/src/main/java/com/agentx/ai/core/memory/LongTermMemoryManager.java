@@ -2,6 +2,7 @@ package com.agentx.ai.core.memory;
 
 import com.agentx.ai.core.prompt.PromptConstants;
 import com.agentx.ai.core.stage.ThinkTagParser;
+import io.micrometer.observation.ObservationRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -58,10 +59,17 @@ public class LongTermMemoryManager {
     private final VectorStore vectorStore;
     private final ChatModel chatModel;
     private final LongTermMemoryConfig config;
+    private final ObservationRegistry observationRegistry;
 
     public LongTermMemoryManager(LongTermMemoryConfig config, ChatModel chatModel) {
+        this(config, chatModel, null);
+    }
+
+    public LongTermMemoryManager(LongTermMemoryConfig config, ChatModel chatModel,
+                                 ObservationRegistry observationRegistry) {
         this.config = config;
         this.chatModel = chatModel;
+        this.observationRegistry = observationRegistry;
         this.vectorStore = config.getVectorStore();
     }
 
@@ -137,7 +145,9 @@ public class LongTermMemoryManager {
         try {
             var typeRef = new ParameterizedTypeReference<List<String>>() {};
             var converter = new BeanOutputConverter<>(typeRef);
-            List<String> raw = ChatClient.builder(chatModel)
+            List<String> raw = (observationRegistry != null
+                    ? ChatClient.builder(chatModel, observationRegistry, null, null)
+                    : ChatClient.builder(chatModel))
                     .build()
                     .prompt()
                     .system(extractPrompt())
@@ -172,7 +182,9 @@ public class LongTermMemoryManager {
                     .append(existing.get(i).getText()).append("\n\n");
         }
         try {
-            String result = ChatClient.builder(chatModel)
+            String result = (observationRegistry != null
+                    ? ChatClient.builder(chatModel, observationRegistry, null, null)
+                    : ChatClient.builder(chatModel))
                     .build()
                     .prompt()
                     .system(mergePrompt())

@@ -120,13 +120,9 @@ public class JsonRepairUtil {
     }
 
     /**
-     * 修复引号问题（中文引号、单引号等）
+     * 修复引号问题（仅处理 JSON 结构位置的单引号；不再替换中文引号，避免破坏字符串值里的中文引号内容）
      */
     private static String fixQuotes(String text) {
-        // 替换中文引号为英文引号
-        text = text.replace("“", "\"").replace("”", "\"");
-        text = text.replace("‘", "'").replace("’", "'");
-
         // 将 JSON 结构位置的单引号替换为双引号（JSON 标准要求双引号）
         // 关键：必须跳过"双引号字符串值内部"的单引号，否则会破坏内容
         // 例如 "代码中调用 $_SERVER['REQUEST_METHOD']" 里的单引号绝不能动

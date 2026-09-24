@@ -34,18 +34,24 @@ public final class ParentChildDocumentRetriever implements DocumentRetriever {
     public List<Document> retrieve(Query query) {
         List<Document> children = baseRetriever.retrieve(query);
         Set<String> seen = new HashSet<>();
-        List<Document> parents = new ArrayList<>();
+        List<Document> results = new ArrayList<>();
         for (Document child : children) {
             String parentId = asString(child.getMetadata().get(MetadataKeys.PARENT_CHUNK_ID));
-            if (parentId == null || !seen.add(parentId)) {
+            // 非父子分块的普通 chunk 没有父块，直接返回自身
+            if (parentId == null) {
+                if (seen.add(child.getId())) {
+                    results.add(child);
+                }
+                continue;
+            }
+            if (!seen.add(parentId)) {
                 continue;
             }
             Document parent = documentStore.get(parentId);
-            if (parent != null) {
-                parents.add(parent);
-            }
+            // 父块缺失时回退返回子块自身，避免命中却丢失结果
+            results.add(parent != null ? parent : child);
         }
-        return parents;
+        return results;
     }
 
     private static String asString(Object value) {

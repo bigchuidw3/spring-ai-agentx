@@ -50,10 +50,17 @@
             <artifactId>reactor-core</artifactId>
         </dependency>
 
-        <!-- Spring JDBC (optional - for DataSource mode: agentx_session / agentx_conversation / agentx_trace) -->
+        <!-- Spring JDBC (optional - for DataSource mode: AgentChatMemory + JdbcMemoryStore) -->
         <dependency>
             <groupId>org.springframework</groupId>
             <artifactId>spring-jdbc</artifactId>
+            <optional>true</optional>
+        </dependency>
+
+        <!-- Micrometer Tracing API (optional - for TracingHook / OpenTelemetry observability) -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-tracing</artifactId>
             <optional>true</optional>
         </dependency>
 
@@ -64,17 +71,10 @@
             <version>${mybatis-plus.version}</version>
         </dependency>
 
-        <!-- Spring AI VectorStore (optional - for long-term memory RAG) -->
+        <!-- Spring AI VectorStore (optional - for SemanticMemory RAG) -->
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-vector-store</artifactId>
-            <optional>true</optional>
-        </dependency>
-
-        <!-- Spring AI PgVectorStore (optional - long-term memory default backend) -->
-        <dependency>
-            <groupId>org.springframework.ai</groupId>
-            <artifactId>spring-ai-pgvector-store</artifactId>
             <optional>true</optional>
         </dependency>
 

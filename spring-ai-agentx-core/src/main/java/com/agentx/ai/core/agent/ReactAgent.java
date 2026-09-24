@@ -47,6 +47,7 @@ import com.agentx.ai.core.tools.toolsearch.DeferredToolRegistry;
 import com.agentx.ai.core.tools.toolsearch.ToolSearchConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import io.micrometer.observation.ObservationRegistry;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.api.Advisor;
 import org.springframework.ai.chat.model.ChatModel;
@@ -100,6 +101,7 @@ public class ReactAgent {
     private final DeferredToolRegistry deferredToolRegistry;
     private TraceStore traceStore;
     private final boolean enableTrace;
+    private final ObservationRegistry observationRegistry;
 
     /**
      * Agent 暂停状态存储。默认内存实现，可通过 {@link Builder#stateStore(PauseStateStore)} 自定义。
@@ -122,7 +124,10 @@ public class ReactAgent {
         }
 
         // 构建 ChatClient，统一配置工具选项和 Advisors
-        ChatClient.Builder clientBuilder = ChatClient.builder(builder.chatModel);
+        // observationRegistry 非空时注入，使 ChatClient/Advisor 层 observation 生效（宿主负责提供配好导出器的 registry）
+        ChatClient.Builder clientBuilder = builder.observationRegistry != null
+                ? ChatClient.builder(builder.chatModel, builder.observationRegistry, null, null)
+                : ChatClient.builder(builder.chatModel);
 
         // 添加 Advisors
         if (!builder.advisors.isEmpty()) {
@@ -163,6 +168,7 @@ public class ReactAgent {
         this.traceStore = traceStore;
         this.enableTrace = builder.enableTrace;
         this.stateStore = stateStore;
+        this.observationRegistry = builder.observationRegistry;
     }
 
     private static SandboxManager buildSandboxManager(Builder builder) {
@@ -236,7 +242,8 @@ public class ReactAgent {
                 .askUserToolName(askUserToolName)
                 .thinkingMode(thinkingMode)
                 .maxRetries(maxRetries)
-                .advisors(advisors);
+                .advisors(advisors)
+                .observationRegistry(observationRegistry);
 
         // 上下文压缩（可选，按需引入 ContextCompactionHook）
         if (this.contextPolicy != null) {
@@ -627,6 +634,7 @@ public class ReactAgent {
         private SandboxConfig sandboxConfig;
         private DeferredToolRegistry deferredToolRegistry;
         private boolean enableTrace = true;
+        private ObservationRegistry observationRegistry;
         private PauseStateStore stateStore;
         private final List<Supplier<ReactAgent>> subAgentProviders = new ArrayList<>();
 
@@ -642,6 +650,16 @@ public class ReactAgent {
 
         public Builder chatModel(ChatModel chatModel) {
             this.chatModel = chatModel;
+            return this;
+        }
+
+        /**
+         * 注入 ObservationRegistry，使 ChatClient/Advisor 层 observation 生效
+         * （配合宿主的 micrometer-tracing + OTel 导出器，如 Opik/Tempo/Jaeger）。
+         * 默认不注入（NOOP，不产生观测数据）。
+         */
+        public Builder observationRegistry(ObservationRegistry observationRegistry) {
+            this.observationRegistry = observationRegistry;
             return this;
         }
 
@@ -1023,7 +1041,7 @@ public class ReactAgent {
             // 传入 LongTermMemoryConfig 时，启用长期记忆
             LongTermMemoryManager longTermMemoryManager = null;
             if (longTermMemoryConfig != null) {
-                longTermMemoryManager = new LongTermMemoryManager(longTermMemoryConfig, chatModel);
+                longTermMemoryManager = new LongTermMemoryManager(longTermMemoryConfig, chatModel, observationRegistry);
             }
 
             // taskManager 默认实例化：流式停止 / 用户主动中断都依赖它，

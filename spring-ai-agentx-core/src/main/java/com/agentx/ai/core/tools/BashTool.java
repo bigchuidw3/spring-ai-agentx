@@ -26,6 +26,8 @@ public class BashTool {
     private static final Logger log = LoggerFactory.getLogger(BashTool.class);
     private static final ObjectMapper objectMapper = new ObjectMapper();
     private static final String DEFAULT_SESSION_ID = "default";
+    /** 单次调用超时上限：模型可按次调大（长任务），但不得超过该值，防止会话被挂死 */
+    private static final long MAX_TIMEOUT_MS = 120000;
 
     private final ShellSessionManager sessionManager;
     private final long defaultTimeoutMs;
@@ -124,7 +126,11 @@ public class BashTool {
                 - 编辑文件 → edit_file（不要用 sed/awk）
                 - 写入文件 → write_file（不要用 echo/cat 重定向）
                 - 搜索文件 → glob_files（不要用 find/ls）
-                - 搜索内容 → grep（不要用 grep/rg 命令）""".formatted(osType, osNotes);
+                - 搜索内容 → grep（不要用 grep/rg 命令）
+
+                超时:
+                - 命令默认 30 秒超时；大文件解析、批处理等长任务请在参数 timeoutMs 中显式调大（最大 120000）
+                - 禁止执行全盘/大范围搜索命令（如 dir /s、find /、rg 整个磁盘）""".formatted(osType, osNotes);
     }
 
     /**
@@ -173,7 +179,7 @@ public class BashTool {
     public String executeShellCommand(
             @ToolParam(description = "【必填】要执行的 Shell 命令") String command,
             @ToolParam(description = "是否在执行前重启 Shell 会话（默认 false）", required = false) Boolean restart,
-            @ToolParam(description = "超时时间（毫秒，默认 120000）", required = false) Long timeoutMs) { // @formatter:on
+            @ToolParam(description = "超时时间（毫秒，默认 30000，最大 120000）", required = false) Long timeoutMs) { // @formatter:on
 
         log.debug("BashTool called with command: {}, restart: {}", command, restart);
 
@@ -186,12 +192,13 @@ public class BashTool {
             sessionManager.removeSession(sessionId);
         }
 
-        // 执行命令
+        // 执行命令（单次超时：未传用默认值；传了则钳制在 [1s, MAX_TIMEOUT_MS]，此前该参数被忽略是缺陷）
         try {
             ShellSessionManager.CommandResult result = sessionManager.executeCommand(
                     sessionId,
                     command,
-                    null  // 工作目录由会话管理器自动处理
+                    null,  // 工作目录由会话管理器自动处理
+                    effectiveTimeoutMs(timeoutMs)
             );
 
             // 格式化输出
@@ -210,6 +217,16 @@ public class BashTool {
      */
     public String executeShellCommand(String command) {
         return executeShellCommand(command, null, null);
+    }
+
+    /**
+     * 计算单次调用超时：未传/非法用默认值，传入值钳制在 [1s, MAX_TIMEOUT_MS]。
+     */
+    private long effectiveTimeoutMs(Long requested) {
+        if (requested == null || requested <= 0) {
+            return defaultTimeoutMs;
+        }
+        return Math.max(1000, Math.min(requested, MAX_TIMEOUT_MS));
     }
 
     /**
@@ -245,7 +262,7 @@ public class BashTool {
      */
     public static class Builder {
         private ShellSessionManager sessionManager;
-        private long timeoutMs = 120000;  // 默认 2 分钟
+        private long timeoutMs = 30000;   // 默认 30 秒（长任务由调用方按次传大，上限 MAX_TIMEOUT_MS）
         private int maxLines = 10000;     // 默认最大 10000 行
         private int maxBytes = 100000;    // 默认最大 100KB
 

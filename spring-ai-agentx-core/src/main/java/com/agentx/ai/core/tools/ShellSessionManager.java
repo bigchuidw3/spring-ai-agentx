@@ -70,7 +70,7 @@ public class ShellSessionManager {
     }
 
     /**
-     * 执行命令
+     * 执行命令（使用管理器配置的默认超时）
      *
      * @param sessionId 会话 ID
      * @param command   命令
@@ -78,6 +78,19 @@ public class ShellSessionManager {
      * @return 命令执行结果
      */
     public CommandResult executeCommand(String sessionId, String command, String directory) {
+        return executeCommand(sessionId, command, directory, timeoutMs);
+    }
+
+    /**
+     * 执行命令（支持单次调用超时覆盖）
+     *
+     * @param sessionId 会话 ID
+     * @param command   命令
+     * @param directory 工作目录
+     * @param perCallTimeoutMs 本次命令超时时间（毫秒）
+     * @return 命令执行结果
+     */
+    public CommandResult executeCommand(String sessionId, String command, String directory, long perCallTimeoutMs) {
         ShellSession session = sessions.computeIfAbsent(sessionId, id -> {
             log.debug("Creating new shell session: {}", id);
             return new ShellSession(id);
@@ -92,7 +105,7 @@ public class ShellSessionManager {
         warnIfWindowsPatternIssue(command);
 
         // 执行命令
-        return executeInSession(session, command);
+        return executeInSession(session, command, perCallTimeoutMs);
     }
 
     /**
@@ -126,11 +139,12 @@ public class ShellSessionManager {
     /**
      * 在会话中执行命令
      *
-     * @param session 会话
-     * @param command 命令
+     * @param session   会话
+     * @param command   命令
+     * @param timeoutMs 本次命令超时时间（毫秒）
      * @return 命令执行结果
      */
-    private CommandResult executeInSession(ShellSession session, String command) {
+    private CommandResult executeInSession(ShellSession session, String command, long timeoutMs) {
         StringBuilder output = new StringBuilder();
         StringBuilder errorOutput = new StringBuilder();
         int exitCode = -1;

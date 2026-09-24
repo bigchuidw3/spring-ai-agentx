@@ -30,6 +30,7 @@ import com.agentx.ai.core.memory.LongTermMemoryManager;
 import com.agentx.ai.core.memory.store.ConversationStore;
 import com.agentx.ai.core.memory.store.SessionMessageStore;
 import com.agentx.ai.core.tools.toolsearch.DeferredToolRegistry;
+import io.micrometer.observation.ObservationRegistry;
 import com.agentx.ai.core.memory.util.MemoryInjector;
 import com.agentx.ai.core.memory.util.MemoryPersistor;
 import com.agentx.ai.core.trace.TraceStore;
@@ -131,7 +132,7 @@ public class AgentLoopExecutor {
         // LLM 调用器
         this.llmInvoker = new LlmInvoker(builder.chatClient, builder.chatModel,
                 builder.maxRetries, advisors, alwaysLoadTools,
-                builder.deferredToolRegistry, deferredToolSession);
+                builder.deferredToolRegistry, deferredToolSession, builder.observationRegistry);
 
         // 记忆注入器（对话开始时加载）
         this.memoryInjector = new MemoryInjector(builder.longTermMemoryManager);
@@ -181,6 +182,7 @@ public class AgentLoopExecutor {
         private List<Advisor> advisors;
         private TraceStore traceStore;
         private PauseStateStore stateStore;
+        private ObservationRegistry observationRegistry;
 
         public Builder chatClient(ChatClient v) {
             this.chatClient = v;
@@ -224,6 +226,11 @@ public class AgentLoopExecutor {
 
         public Builder chatModel(ChatModel v) {
             this.chatModel = v;
+            return this;
+        }
+
+        public Builder observationRegistry(ObservationRegistry v) {
+            this.observationRegistry = v;
             return this;
         }
 
@@ -691,7 +698,14 @@ public class AgentLoopExecutor {
                                 execCtx, err, "reasoning", retryAttempt, retryAttempt < maxRetries));
                     }
                     llmInvoker.handleStreamError(err, retryAttempt, sink,
-                            () -> scheduleRound(messages, sink, roundCounter, params, execCtx, query, retryAttempt + 1),
+                            () -> {
+                                if (taskManager != null && conversationId != null
+                                        && !taskManager.hasRunningTask(conversationId)) {
+                                    log.debug("Task stopped, skip retry: conversationId={}", conversationId);
+                                    return;
+                                }
+                                scheduleRound(messages, sink, roundCounter, params, execCtx, query, retryAttempt + 1);
+                            },
                             "LLM stream error",
                             () -> {
                                 execCtx.markTerminal("error");
@@ -961,7 +975,14 @@ public class AgentLoopExecutor {
                                 execCtx, err, "forceFinal", retryAttempt, retryAttempt < maxRetries));
                     }
                     return llmInvoker.handleStreamError(err, retryAttempt, sink,
-                        () -> forceFinalStream(messages, sink, params, execCtx, query, retryAttempt + 1),
+                        () -> {
+                            String cid = params != null ? params.getConversationId() : null;
+                            if (taskManager != null && cid != null && !taskManager.hasRunningTask(cid)) {
+                                log.debug("Task stopped, skip retry: conversationId={}", cid);
+                                return;
+                            }
+                            forceFinalStream(messages, sink, params, execCtx, query, retryAttempt + 1);
+                        },
                         "forceFinal stream error",
                         () -> {
                             execCtx.markTerminal("error");

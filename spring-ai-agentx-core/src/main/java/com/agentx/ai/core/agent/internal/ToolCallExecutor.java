@@ -124,6 +124,10 @@ public class ToolCallExecutor {
         }
 
         String rawResult = result != null ? result.toString() : "{}";
+        // 空/空白结果在协议层是非法的 tool content，兜底为明确占位，避免下一轮 LLM 调用 400
+        if (rawResult.isBlank()) {
+            rawResult = "（工具无返回内容）";
+        }
         return new ToolExecutionResult(rawResult);
     }
 

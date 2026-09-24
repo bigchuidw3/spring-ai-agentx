@@ -4,6 +4,7 @@ import com.agentx.ai.core.exception.AgentErrorCode;
 import com.agentx.ai.core.exception.AgentException;
 import com.agentx.ai.core.model.AgentStreamEvent;
 import com.agentx.ai.core.tools.toolsearch.DeferredToolRegistry;
+import io.micrometer.observation.ObservationRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -46,12 +47,14 @@ public class LlmInvoker {
     private final List<ToolCallback> alwaysLoadTools;
     private final DeferredToolRegistry deferredToolRegistry;
     private final DeferredToolRegistry.Session deferredToolSession;
+    private final ObservationRegistry observationRegistry;
 
     public LlmInvoker(ChatClient chatClient, ChatModel chatModel,
                       int maxRetries, List<Advisor> advisors,
                       List<ToolCallback> alwaysLoadTools,
                       DeferredToolRegistry deferredToolRegistry,
-                      DeferredToolRegistry.Session deferredToolSession) {
+                      DeferredToolRegistry.Session deferredToolSession,
+                      ObservationRegistry observationRegistry) {
         this.chatClient = chatClient;
         this.chatModel = chatModel;
         this.maxRetries = maxRetries;
@@ -59,6 +62,7 @@ public class LlmInvoker {
         this.alwaysLoadTools = alwaysLoadTools;
         this.deferredToolRegistry = deferredToolRegistry;
         this.deferredToolSession = deferredToolSession;
+        this.observationRegistry = observationRegistry;
     }
 
     /**
@@ -76,7 +80,9 @@ public class LlmInvoker {
         roundTools.addAll(deferredToolSession.getActiveDeferredTools());
         roundTools.add(deferredToolSession.getToolSearchCallback());
 
-        ChatClient.Builder clientBuilder = ChatClient.builder(chatModel);
+        ChatClient.Builder clientBuilder = observationRegistry != null
+                ? ChatClient.builder(chatModel, observationRegistry, null, null)
+                : ChatClient.builder(chatModel);
 
         if (!advisors.isEmpty()) {
             clientBuilder.defaultAdvisors(advisors);

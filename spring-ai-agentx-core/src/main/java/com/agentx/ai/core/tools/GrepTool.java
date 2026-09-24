@@ -39,6 +39,9 @@ public class GrepTool {
     private static final int DEFAULT_HEAD_LIMIT = 250;
     private static final boolean DEFAULT_CASE_SENSITIVE = false;
     private static final int DEFAULT_CONTEXT_LINES = 0;
+    /** Java 原生实现的目录扫描防护：最多扫描文件数与单文件大小上限，防止大目录/整盘搜索拖死会话 */
+    private static final int MAX_WALK_FILES = 5000;
+    private static final long MAX_FILE_BYTES = 2 * 1024 * 1024;
 
     private final Path cwd;
     private final List<Path> allowedRoots;
@@ -236,6 +239,11 @@ public class GrepTool {
             int headLimit,
             int offset) throws IOException, InterruptedException {
 
+        // 与 Java 实现对齐：路径不存在时快速失败，不启动子进程
+        if (!Files.exists(searchPath)) {
+            return "Error: Path does not exist: " + searchPath;
+        }
+
         List<String> command = new ArrayList<>();
         command.add("rg");
 
@@ -330,24 +338,39 @@ public class GrepTool {
 
         // 如果是单个文件
         if (Files.isRegularFile(searchPath)) {
+            if (fileTooLarge(searchPath)) {
+                return "Error: file too large to grep (> " + (MAX_FILE_BYTES / 1024 / 1024) + "MB): " + searchPath;
+            }
             if (matchesGlob(searchPath.getFileName().toString(), glob)) {
                 List<String> fileResults = searchFile(searchPath, regex,
                     outputMode, beforeContext, afterContext);
                 resultLines.addAll(fileResults);
             }
         } else if (Files.isDirectory(searchPath)) {
-            // 遍历目录
+            // 遍历目录：限制扫描文件数与单文件大小，防止大目录（如整盘）拖死会话
+            List<Path> files;
             try (Stream<Path> paths = Files.walk(searchPath)) {
-                List<Path> files = paths
+                files = paths
                     .filter(Files::isRegularFile)
                     .filter(p -> matchesGlob(p.getFileName().toString(), glob))
+                    .limit(MAX_WALK_FILES + 1)
                     .collect(Collectors.toList());
-
-                for (Path file : files) {
-                    List<String> fileResults = searchFile(file, regex,
-                        outputMode, beforeContext, afterContext);
-                    resultLines.addAll(fileResults);
+            }
+            boolean truncated = files.size() > MAX_WALK_FILES;
+            if (truncated) {
+                files = files.subList(0, MAX_WALK_FILES);
+            }
+            for (Path file : files) {
+                if (fileTooLarge(file)) {
+                    continue;
                 }
+                List<String> fileResults = searchFile(file, regex,
+                    outputMode, beforeContext, afterContext);
+                resultLines.addAll(fileResults);
+            }
+            if (truncated) {
+                resultLines.add("(注意：目录内匹配文件数超过 " + MAX_WALK_FILES
+                        + "，结果可能不完整，请缩小搜索路径或用 glob 过滤)");
             }
         }
 
@@ -422,6 +445,17 @@ public class GrepTool {
             log.debug("Skipping file due to IO error: {}", file);
         }
         return results;
+    }
+
+    /**
+     * 单文件是否超过 grep 可处理的大小上限（无法读取大小时按超限跳过）。
+     */
+    private boolean fileTooLarge(Path file) {
+        try {
+            return Files.size(file) > MAX_FILE_BYTES;
+        } catch (IOException e) {
+            return true;
+        }
     }
 
     /**

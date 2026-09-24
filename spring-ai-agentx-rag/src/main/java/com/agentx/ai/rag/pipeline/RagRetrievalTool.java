@@ -38,6 +38,9 @@ public final class RagRetrievalTool {
     }
 
     private static String joinTexts(List<Document> documents) {
+        if (documents == null || documents.isEmpty()) {
+            return "未检索到相关内容";
+        }
         StringBuilder result = new StringBuilder();
         for (Document document : documents) {
             if (!result.isEmpty()) {

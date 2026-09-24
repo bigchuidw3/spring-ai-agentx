@@ -29,6 +29,13 @@ public class AgentRuntimeContext {
     private TraceManager traceManager;
     private long sessionId;
 
+    /**
+     * 可观测性状态（由 TracingHook 写入，类型为 Object 以避免核心上下文类
+     * 反向依赖 observability 包）。持有 TracingState：根 span/scope 与
+     * 在途 tool span，跨线程（调用线程 → boundedElastic）显式携带。
+     */
+    private volatile Object tracingState;
+
     private final AtomicLong totalPromptTokens = new AtomicLong(0);
     private final AtomicLong totalCompletionTokens = new AtomicLong(0);
     private final AtomicInteger totalRounds = new AtomicInteger(0);
@@ -181,6 +188,14 @@ public class AgentRuntimeContext {
 
     public void setTraceManager(TraceManager traceManager) {
         this.traceManager = traceManager;
+    }
+
+    public Object getTracingState() {
+        return tracingState;
+    }
+
+    public void setTracingState(Object tracingState) {
+        this.tracingState = tracingState;
     }
 
     /**

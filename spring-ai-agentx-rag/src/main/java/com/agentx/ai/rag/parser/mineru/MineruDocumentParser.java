@@ -38,8 +38,16 @@ public final class MineruDocumentParser implements DocumentParser {
     public static final int DEFAULT_IMAGE_WORKERS = 4;
 
     private static final Set<String> SUPPORTED_EXTENSIONS = Set.of(
+            // 文档
             ".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx",
-            ".png", ".jpg", ".jpeg", ".jp2", ".webp", ".gif", ".bmp", ".html", ".htm");
+            // 图片
+            ".png", ".jpg", ".jpeg", ".jp2", ".webp", ".gif", ".bmp", ".heic", ".tif", ".tiff",
+            // 网页
+            ".html", ".htm", ".shtml",
+            // 纯文本
+            ".txt", ".md", ".markdown",
+            // 电子书 / 富文本 / 其他
+            ".epub", ".rtf", ".odt", ".ods", ".odp", ".csv", ".tsv");
 
     private final MineruClient client;
     private final MineruResultParser resultParser;
