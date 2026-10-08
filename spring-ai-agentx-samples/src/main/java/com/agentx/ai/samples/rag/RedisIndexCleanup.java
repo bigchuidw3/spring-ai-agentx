@@ -55,7 +55,7 @@ public class RedisIndexCleanup {
             String text = String.valueOf(json);
             System.out.println("key = " + firstKey);
             System.out.println("含 docType: " + text.contains(DOC_TYPE));
-            System.out.println("含 aicube: " + text.contains("aicube"));
+            System.out.println("含 demo: " + text.contains("demo"));
             System.out.println("含 fileName: " + text.contains("fileName"));
         } else {
             System.out.println("没有找到 rag:* 的 key，数据可能没写入");

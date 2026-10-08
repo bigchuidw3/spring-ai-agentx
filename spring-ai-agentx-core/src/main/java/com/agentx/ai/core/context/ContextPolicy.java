@@ -33,6 +33,7 @@ package com.agentx.ai.core.context;
  * @param toolResultPreviewChars    L1 模板里工具结果预览长度（字符）。默认 100
  * @param maxLlmCompressionCount    L4/L5 单次 compact 最多处理的压缩单元数。默认 3
  * @param currentRoundRatio         L6 目标压缩比（0-1）。默认 0.3
+ * @param toolResultEvictionChars   工具结果源头卸载的字符阈值。单条工具结果超过该值即 offload + 首尾预览，上下文只留占位。默认 20000（0 禁用）
  * @author bigchui
  */
 public record ContextPolicy(
@@ -46,7 +47,8 @@ public record ContextPolicy(
         int toolArgPreviewChars,
         int toolResultPreviewChars,
         int maxLlmCompressionCount,
-        double currentRoundRatio
+        double currentRoundRatio,
+        int toolResultEvictionChars
 ) {
 
     public static final int DEFAULT_LAST_KEEP = 50;
@@ -60,6 +62,7 @@ public record ContextPolicy(
     public static final int DEFAULT_TOOL_RESULT_PREVIEW_CHARS = 100;
     public static final int DEFAULT_MAX_LLM_COMPRESSION_COUNT = 3;
     public static final double DEFAULT_CURRENT_ROUND_RATIO = 0.3;
+    public static final int DEFAULT_TOOL_RESULT_EVICTION_CHARS = 20000;
 
     public static ContextPolicy defaults() {
         return new ContextPolicy(
@@ -73,7 +76,8 @@ public record ContextPolicy(
                 DEFAULT_TOOL_ARG_PREVIEW_CHARS,
                 DEFAULT_TOOL_RESULT_PREVIEW_CHARS,
                 DEFAULT_MAX_LLM_COMPRESSION_COUNT,
-                DEFAULT_CURRENT_ROUND_RATIO
+                DEFAULT_CURRENT_ROUND_RATIO,
+                DEFAULT_TOOL_RESULT_EVICTION_CHARS
         );
     }
 
@@ -93,6 +97,7 @@ public record ContextPolicy(
         private int toolResultPreviewChars = DEFAULT_TOOL_RESULT_PREVIEW_CHARS;
         private int maxLlmCompressionCount = DEFAULT_MAX_LLM_COMPRESSION_COUNT;
         private double currentRoundRatio = DEFAULT_CURRENT_ROUND_RATIO;
+        private int toolResultEvictionChars = DEFAULT_TOOL_RESULT_EVICTION_CHARS;
 
         public Builder lastKeep(int v) { this.lastKeep = v; return this; }
         public Builder msgThreshold(int v) { this.msgThreshold = v; return this; }
@@ -105,6 +110,7 @@ public record ContextPolicy(
         public Builder toolResultPreviewChars(int v) { this.toolResultPreviewChars = v; return this; }
         public Builder maxLlmCompressionCount(int v) { this.maxLlmCompressionCount = v; return this; }
         public Builder currentRoundRatio(double v) { this.currentRoundRatio = v; return this; }
+        public Builder toolResultEvictionChars(int v) { this.toolResultEvictionChars = v; return this; }
 
         public ContextPolicy build() {
             return new ContextPolicy(
@@ -112,7 +118,8 @@ public record ContextPolicy(
                     minConsecutiveToolMessages, minCompressionTokens,
                     largePayloadTokens, offloadPreviewChars,
                     toolArgPreviewChars, toolResultPreviewChars,
-                    maxLlmCompressionCount, currentRoundRatio
+                    maxLlmCompressionCount, currentRoundRatio,
+                    toolResultEvictionChars
             );
         }
     }

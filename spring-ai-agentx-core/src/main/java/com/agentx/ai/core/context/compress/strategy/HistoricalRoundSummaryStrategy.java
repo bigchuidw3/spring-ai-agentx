@@ -76,9 +76,10 @@ public class HistoricalRoundSummaryStrategy implements CompressionStrategy {
                 log.info("[L4] LLM summary returned empty for round={}, skipping", pairIdx + 1);
                 continue;
             }
+            ctx.accumulateSummaryTokens(summarizer.getLastPromptTokens(), summarizer.getLastCompletionTokens());
 
             String uuid = ctx.hasOffloadStore()
-                    ? ctx.offloadStore().offload(ctx.conversationId(), ctx.sessionId(), segment)
+                    ? ctx.offloadStore().offload(ctx.conversationId(), ctx.sessionId(), ctx.userId(), segment)
                     : null;
             String summaryMessage = "[历史轮次摘要]\n" + summary + buildOffloadHint(uuid);
             for (int i = endExclusive - 1; i >= start; i--) {

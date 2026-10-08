@@ -16,10 +16,10 @@ public interface OffloadStore {
      * 将一段原始消息 offload，返回分配的 UUID。
      * conversationId 为 null 时直接返回 null（不持久化）。
      */
-    String offload(String conversationId, long sessionId, List<Message> messages);
+    String offload(String conversationId, long sessionId, String userId, List<Message> messages);
 
-    default String offload(String conversationId, long sessionId, Message message) {
-        return message == null ? null : offload(conversationId, sessionId, List.of(message));
+    default String offload(String conversationId, long sessionId, String userId, Message message) {
+        return message == null ? null : offload(conversationId, sessionId, userId, List.of(message));
     }
 
     /**

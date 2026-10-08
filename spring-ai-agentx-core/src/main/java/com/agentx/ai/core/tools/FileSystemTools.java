@@ -11,6 +11,7 @@ import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
@@ -154,7 +155,6 @@ public class FileSystemTools {
             @ToolParam(description = "【必填】要读取的文件路径，禁止传空。支持绝对路径或相对路径。例如: 'pom.xml'、'./src/main/java/App.java'") String filePath,
             @ToolParam(description = "起始行偏移量（默认: 0）", required = false) Integer offset,
             @ToolParam(description = "最大读取行数（默认: 500）", required = false) Integer limit,
-            @ToolParam(description = "图片编码格式（可选）", required = false) String imageFormat,
             ToolContext toolContext) { // @formatter:on
 
         ExecutionBackend eb = SandboxToolContexts.extract(toolContext);
@@ -329,6 +329,12 @@ public class FileSystemTools {
                        (maxFileSizeBytes / 1024 / 1024) + "MB)";
             }
 
+            // 二进制文件（图片等）无法按文本读取，返回友好提示，避免把字节读成乱码撑爆上下文
+            if (isBinaryFile(filePath)) {
+                return "Error: 文件 '" + filePath.getFileName() + "' 是二进制文件（如图片/编译产物），"
+                        + "无法用 read_file 按文本读取。请改用 analyzeFile 或其它专用工具处理。";
+            }
+
             // 尝试多种编码读取文件（处理编码问题）
             String content = readStringWithFallback(filePath);
 
@@ -360,6 +366,24 @@ public class FileSystemTools {
         } catch (IOException e) {
             logger.error("IO error reading file '{}': {}", filePath, e.getMessage(), e);
             return "Error reading file '" + filePath + "': " + e.getMessage();
+        }
+    }
+
+    /**
+     * 检测文件是否为二进制（含 NUL 字节），避免把图片等二进制文件读成乱码。
+     */
+    private boolean isBinaryFile(Path filePath) {
+        try (InputStream in = Files.newInputStream(filePath)) {
+            byte[] buf = new byte[8192];
+            int n = in.read(buf);
+            for (int i = 0; i < n; i++) {
+                if (buf[i] == 0) {
+                    return true;
+                }
+            }
+            return false;
+        } catch (IOException e) {
+            return false;
         }
     }
 

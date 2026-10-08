@@ -12,7 +12,7 @@ import java.util.List;
 public class NoOpOffloadStore implements OffloadStore {
 
     @Override
-    public String offload(String conversationId, long sessionId, List<Message> messages) {
+    public String offload(String conversationId, long sessionId, String userId, List<Message> messages) {
         return null;
     }
 

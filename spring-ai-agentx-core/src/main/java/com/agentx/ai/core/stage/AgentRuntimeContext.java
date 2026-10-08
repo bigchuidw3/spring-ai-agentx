@@ -40,6 +40,17 @@ public class AgentRuntimeContext {
     private final AtomicLong totalCompletionTokens = new AtomicLong(0);
     private final AtomicInteger totalRounds = new AtomicInteger(0);
 
+    /**
+     * 本次调用开始时刻（构造即调用开始），终态汇总时计算端到端耗时。
+     */
+    private final long callStartedAt = System.currentTimeMillis();
+
+    /**
+     * 本次调用实际使用的模型名（每个流式 chunk 的 metadata.getModel() 持续刷新，
+     * 终态时取最后一次值），供调用记录（agentx_conversation.model_name）落库。
+     */
+    private volatile String modelName;
+
     private volatile int newMsgStartIndex;
     private volatile List<Message> originalMessagesSnapshot;
     private final AtomicReference<String> terminalStatus = new AtomicReference<>(null);
@@ -238,6 +249,18 @@ public class AgentRuntimeContext {
 
     public int getTotalRounds() {
         return totalRounds.get();
+    }
+
+    public long getCallStartedAt() {
+        return callStartedAt;
+    }
+
+    public String getModelName() {
+        return modelName;
+    }
+
+    public void setModelName(String modelName) {
+        this.modelName = modelName;
     }
 
     public List<Message> getMessages() {

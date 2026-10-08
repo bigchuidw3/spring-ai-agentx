@@ -43,6 +43,7 @@ public class SandboxConfig {
     private final IsolationScope isolationScope;
     private final WorkspaceSpec workspaceSpec;
     private final boolean strictMode;
+    private final boolean autoRelease;
     private final java.nio.file.Path snapshotDir;
     private final SnapshotStorage snapshotStorage;
     private final SnapshotMetadataStore snapshotMetadataStore;
@@ -52,6 +53,7 @@ public class SandboxConfig {
         this.isolationScope = b.isolationScope;
         this.workspaceSpec = b.workspaceSpec;
         this.strictMode = b.strictMode;
+        this.autoRelease = b.autoRelease;
         this.snapshotDir = b.snapshotDir;
         this.snapshotStorage = b.snapshotStorage;
         this.snapshotMetadataStore = b.snapshotMetadataStore;
@@ -87,6 +89,16 @@ public class SandboxConfig {
     }
 
     /**
+     * 是否在调用结束（AfterCall）时自动销毁沙箱容器。
+     *
+     * <p>{@code true}（默认）：每次调用结束导出快照后销毁容器，下次从快照恢复。
+     * {@code false}：容器常驻，不随会话销毁，由使用方在关闭沙箱时显式销毁。
+     */
+    public boolean isAutoRelease() {
+        return autoRelease;
+    }
+
+    /**
      * 本地快照目录（使用内置 LocalSnapshotStorage 时生效）。
      */
     public java.nio.file.Path getSnapshotDir() {
@@ -107,6 +119,7 @@ public class SandboxConfig {
         private IsolationScope isolationScope = IsolationScope.CONVERSATION;
         private WorkspaceSpec workspaceSpec = WorkspaceSpec.empty();
         private boolean strictMode = false;
+        private boolean autoRelease = true;
         private java.nio.file.Path snapshotDir;
         private SnapshotStorage snapshotStorage;
         private SnapshotMetadataStore snapshotMetadataStore;
@@ -136,6 +149,15 @@ public class SandboxConfig {
          */
         public Builder strictMode(boolean strict) {
             this.strictMode = strict;
+            return this;
+        }
+
+        /**
+         * 是否在调用结束（AfterCall）时自动销毁沙箱容器。
+         * {@code false} 时容器常驻，由使用方在关闭沙箱时显式销毁。
+         */
+        public Builder autoRelease(boolean autoRelease) {
+            this.autoRelease = autoRelease;
             return this;
         }
 

@@ -46,6 +46,14 @@ public class HistoricalToolListStrategy implements CompressionStrategy {
             int[] range = ranges.get(i);
             int start = range[0];
             int end = range[1];
+            // 段不能以「含 tool_calls 的 assistant」结尾：其 tool_result 在扫描范围外，
+            // 若一并替换会导致 tool 消息孤立、破坏 tool_calls→tool 配对
+            while (end > start && isAssistantWithToolCalls(messages.get(end - 1))) {
+                end--;
+            }
+            if (end <= start) {
+                continue;
+            }
             List<Message> segment = new ArrayList<>(messages.subList(start, end));
 
             String uuid = offloadSegment(ctx, segment);
@@ -107,9 +115,14 @@ public class HistoricalToolListStrategy implements CompressionStrategy {
         return false;
     }
 
+    private boolean isAssistantWithToolCalls(Message msg) {
+        return msg instanceof AssistantMessage am
+                && am.getToolCalls() != null && !am.getToolCalls().isEmpty();
+    }
+
     private String offloadSegment(CompressionContext ctx, List<Message> segment) {
         return ctx.hasOffloadStore()
-                ? ctx.offloadStore().offload(ctx.conversationId(), ctx.sessionId(), segment)
+                ? ctx.offloadStore().offload(ctx.conversationId(), ctx.sessionId(), ctx.userId(), segment)
                 : null;
     }
 
@@ -174,5 +187,10 @@ public class HistoricalToolListStrategy implements CompressionStrategy {
         if (s == null) return "";
         if (s.length() <= max) return s;
         return s.substring(0, max) + "...";
+    }
+
+    @Override
+    public String name() {
+        return "L1-HistoricalToolList";
     }
 }

@@ -77,9 +77,10 @@ public class CurrentRoundLargeMsgStrategy implements CompressionStrategy {
                 log.info("[L5] LLM summary empty, skipping index={}", i);
                 continue;
             }
+            ctx.accumulateSummaryTokens(summarizer.getLastPromptTokens(), summarizer.getLastCompletionTokens());
 
             String uuid = ctx.hasOffloadStore()
-                    ? ctx.offloadStore().offload(ctx.conversationId(), ctx.sessionId(), original)
+                    ? ctx.offloadStore().offload(ctx.conversationId(), ctx.sessionId(), ctx.userId(), original)
                     : null;
             String replaced = summary + "\n[原文已 offload"
                     + (uuid != null ? ", uuid=" + uuid : "")

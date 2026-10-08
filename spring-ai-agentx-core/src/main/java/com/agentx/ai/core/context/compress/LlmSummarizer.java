@@ -24,6 +24,14 @@ public class LlmSummarizer {
 
     private final ChatModel chatModel;
 
+    /** 最近一次摘要调用的 token 用量（供 COMPACT trace 记录摘要 LLM 调用） */
+    private int lastPromptTokens = 0;
+    private int lastCompletionTokens = 0;
+    /** 最近一次摘要调用的真实输入/输出（供 trace 记录完整入参出参） */
+    private String lastSystemPrompt;
+    private String lastUserPrompt;
+    private String lastSummary;
+
     public LlmSummarizer(ChatModel chatModel) {
         this.chatModel = chatModel;
     }
@@ -36,6 +44,8 @@ public class LlmSummarizer {
      * @return 摘要文本；失败返回 null
      */
     public String summarize(String systemPrompt, String userPrompt) {
+        this.lastSystemPrompt = systemPrompt;
+        this.lastUserPrompt = userPrompt;
         try {
             ChatResponse response = chatModel.call(new Prompt(List.of(
                     new SystemMessage(systemPrompt),
@@ -43,14 +53,41 @@ public class LlmSummarizer {
             )));
             String summary = response.getResult().getOutput().getText();
             summary = ThinkTagParser.stripThinkTags(summary);
+            this.lastSummary = summary;
+            if (response.getMetadata() != null && response.getMetadata().getUsage() != null) {
+                var usage = response.getMetadata().getUsage();
+                this.lastPromptTokens = usage.getPromptTokens();
+                this.lastCompletionTokens = usage.getCompletionTokens();
+            }
             log.debug("[LlmSummarizer] summary generated: inputChars={}, outputChars={}",
                     userPrompt != null ? userPrompt.length() : 0,
                     summary != null ? summary.length() : 0);
             return summary;
         } catch (Exception e) {
+            this.lastSummary = null;
             log.warn("[LlmSummarizer] LLM call failed: {}", e.getMessage());
             return null;
         }
+    }
+
+    public int getLastPromptTokens() {
+        return lastPromptTokens;
+    }
+
+    public int getLastCompletionTokens() {
+        return lastCompletionTokens;
+    }
+
+    public String getLastSystemPrompt() {
+        return lastSystemPrompt;
+    }
+
+    public String getLastUserPrompt() {
+        return lastUserPrompt;
+    }
+
+    public String getLastSummary() {
+        return lastSummary;
     }
 
     /**

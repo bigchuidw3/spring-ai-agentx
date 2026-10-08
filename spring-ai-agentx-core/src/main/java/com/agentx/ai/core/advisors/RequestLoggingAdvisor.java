@@ -47,6 +47,9 @@ public class RequestLoggingAdvisor implements CallAdvisor, StreamAdvisor {
 
     private final ChatModel chatModel;
 
+    /** 最近一次构建的请求 JSON（请求发出前写入，供流失败时读取）。 */
+    private volatile String lastRequestJson;
+
     public RequestLoggingAdvisor(ChatModel chatModel) {
         this.chatModel = chatModel;
     }
@@ -64,11 +67,19 @@ public class RequestLoggingAdvisor implements CallAdvisor, StreamAdvisor {
     @Override
     public Flux<ChatClientResponse> adviseStream(ChatClientRequest request, StreamAdvisorChain chain) {
         String json = buildRequestJson(request, true);
+        this.lastRequestJson = json;
         Flux<ChatClientResponse> flux = chain.nextStream(request);
         if (json != null) {
             flux = flux.doOnNext(response -> response.context().put(LLM_REQUEST_JSON, json));
         }
         return flux;
+    }
+
+    /**
+     * 最近一次构建的请求 JSON。请求发出前写入，流失败（onError）时仍可读取。
+     */
+    public String getLastRequestJson() {
+        return lastRequestJson;
     }
 
     /**

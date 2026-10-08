@@ -1,6 +1,7 @@
 package com.agentx.ai.core.context.compress;
 
 import com.agentx.ai.core.context.ContextPolicy;
+import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatModel;
@@ -19,18 +20,24 @@ public class CompressionContext {
     private final String query;
     private final String conversationId;
     private final long sessionId;
+    private final String userId;
     private final ContextPolicy policy;
     private final ChatModel chatModel;
     private final OffloadStore offloadStore;
 
+    /** 本轮 compact 中摘要 LLM 调用（L4/L5/L6）的累计 token，供 COMPACT trace 记录摘要调用 */
+    private long summaryPromptTokens = 0;
+    private long summaryCompletionTokens = 0;
+
     public CompressionContext(List<Message> messages, String query,
-                              String conversationId, long sessionId,
+                              String conversationId, long sessionId, String userId,
                               ContextPolicy policy, ChatModel chatModel,
                               OffloadStore offloadStore) {
         this.messages = messages;
         this.query = query;
         this.conversationId = conversationId;
         this.sessionId = sessionId;
+        this.userId = userId;
         this.policy = policy;
         this.chatModel = chatModel;
         this.offloadStore = offloadStore;
@@ -50,6 +57,10 @@ public class CompressionContext {
 
     public long sessionId() {
         return sessionId;
+    }
+
+    public String userId() {
+        return userId;
     }
 
     public ContextPolicy policy() {
@@ -92,5 +103,35 @@ public class CompressionContext {
         }
         int protectedStart = Math.max(0, messages.size() - lastKeep);
         return Math.min(latestUser, protectedStart);
+    }
+
+    /**
+     * 待处理工具结果的保护边界（exclusive）：最后一个含 tool_calls 的 AssistantMessage 索引。
+     * <p>该索引之后的 ToolResponseMessage 是 LLM 下一轮正在等待的工具结果，不应被 offload；
+     * 该索引之前（含当前轮里已经「看过」的超长工具结果）则允许被 offload。
+     * 不存在任何 tool_calls 时返回 {@code messages.size()}（即全链可扫）。
+     */
+    public int latestToolCallBoundary() {
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            Message m = messages.get(i);
+            if (m instanceof AssistantMessage am
+                    && am.getToolCalls() != null && !am.getToolCalls().isEmpty()) {
+                return i;
+            }
+        }
+        return messages.size();
+    }
+
+    public void accumulateSummaryTokens(long promptTokens, long completionTokens) {
+        this.summaryPromptTokens += promptTokens;
+        this.summaryCompletionTokens += completionTokens;
+    }
+
+    public long getSummaryPromptTokens() {
+        return summaryPromptTokens;
+    }
+
+    public long getSummaryCompletionTokens() {
+        return summaryCompletionTokens;
     }
 }

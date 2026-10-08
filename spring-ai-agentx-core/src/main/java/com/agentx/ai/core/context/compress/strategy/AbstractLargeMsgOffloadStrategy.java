@@ -55,7 +55,7 @@ public abstract class AbstractLargeMsgOffloadStrategy implements CompressionStra
             }
 
             String uuid = ctx.hasOffloadStore()
-                    ? ctx.offloadStore().offload(ctx.conversationId(), ctx.sessionId(), original)
+                    ? ctx.offloadStore().offload(ctx.conversationId(), ctx.sessionId(), ctx.userId(), original)
                     : null;
 
             Message replaced = replaceWithPreview(original, uuid, policy);

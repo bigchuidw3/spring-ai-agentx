@@ -20,12 +20,12 @@ public class SessionBackedOffloadStore implements OffloadStore {
     }
 
     @Override
-    public String offload(String conversationId, long sessionId, List<Message> messages) {
+    public String offload(String conversationId, long sessionId, String userId, List<Message> messages) {
         if (conversationId == null || messages == null || messages.isEmpty() || sessionMessageStore == null) {
             return null;
         }
         String uuid = UUID.randomUUID().toString();
-        sessionMessageStore.appendOffloadMessages(conversationId, sessionId, uuid, messages);
+        sessionMessageStore.appendOffloadMessages(conversationId, sessionId, userId, uuid, messages);
         return uuid;
     }
 

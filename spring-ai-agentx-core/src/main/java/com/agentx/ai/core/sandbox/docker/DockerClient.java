@@ -40,7 +40,8 @@ public class DockerClient {
      * 创建容器（不启动）。
      */
     public void createContainer(String name, String image, String workspaceRoot,
-                                boolean networkDisabled, int memoryMb, int cpuCount) {
+                                boolean networkDisabled, int memoryMb, int cpuCount,
+                                List<String> mounts) {
         List<String> cmd = new ArrayList<>();
         cmd.add("docker");
         cmd.add("create");
@@ -51,6 +52,10 @@ public class DockerClient {
         }
         cmd.add("--memory=" + memoryMb + "m");
         cmd.add("--cpus=" + cpuCount);
+        for (String mount : mounts) {
+            cmd.add("-v");
+            cmd.add(mount);
+        }
         cmd.add("-w");
         cmd.add(workspaceRoot);
         cmd.add(image);

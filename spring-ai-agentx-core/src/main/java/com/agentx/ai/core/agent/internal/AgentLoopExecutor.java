@@ -3,6 +3,7 @@ package com.agentx.ai.core.agent.internal;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.agentx.ai.core.exception.AgentErrorCode;
 import com.agentx.ai.core.exception.AgentException;
+import com.agentx.ai.core.context.compress.OffloadStore;
 import com.agentx.ai.core.interrupt.PauseStateStore;
 import com.agentx.ai.core.interrupt.SafePoint;
 import com.agentx.ai.core.interrupt.PauseReason;
@@ -155,7 +156,7 @@ public class AgentLoopExecutor {
 
         // 工具调用执行器
         this.toolCallExecutor = new ToolCallExecutor(toolMap, new ObjectMapper(),
-                builder.askUserToolName, hookManager);
+                builder.askUserToolName, hookManager, builder.offloadStore, builder.toolResultEvictionChars);
     }
 
     public static Builder builder() {
@@ -183,6 +184,8 @@ public class AgentLoopExecutor {
         private TraceStore traceStore;
         private PauseStateStore stateStore;
         private ObservationRegistry observationRegistry;
+        private OffloadStore offloadStore;
+        private int toolResultEvictionChars;
 
         public Builder chatClient(ChatClient v) {
             this.chatClient = v;
@@ -231,6 +234,16 @@ public class AgentLoopExecutor {
 
         public Builder observationRegistry(ObservationRegistry v) {
             this.observationRegistry = v;
+            return this;
+        }
+
+        public Builder offloadStore(OffloadStore v) {
+            this.offloadStore = v;
+            return this;
+        }
+
+        public Builder toolResultEvictionChars(int v) {
+            this.toolResultEvictionChars = v;
             return this;
         }
 
@@ -542,7 +555,9 @@ public class AgentLoopExecutor {
             }
         }
 
-        AtomicLong roundCounter = new AtomicLong(state.getCurrentRound());
+        // 中断恢复（带新指令 resumeQuery）视为一个新请求，轮次从头计；纯 HITL（无新指令）接着原轮次
+        AtomicLong roundCounter = new AtomicLong(
+                resumeQuery != null && !resumeQuery.isBlank() ? 0 : state.getCurrentRound());
         AgentRuntimeContext execCtx = new AgentRuntimeContext(state.getQuery(), state.getParams());
         execCtx.setEmitter(sink::tryEmitNext);
         execCtx.setMessages(messages);
@@ -643,7 +658,12 @@ public class AgentLoopExecutor {
     private Disposable scheduleRound(List<Message> messages, Sinks.Many<AgentStreamEvent> sink,
                                      AtomicLong roundCounter, RunnableParams params,
                                      AgentRuntimeContext execCtx, String query, int retryAttempt) {
-        long round = roundCounter.incrementAndGet();
+        // LLM 流失败重试复用当前轮次号：重试不消耗新轮次，保证 trace 中 round 连续、maxRounds 语义正确
+        long round = retryAttempt == 0 ? roundCounter.incrementAndGet() : roundCounter.get();
+        // 同步运行时轮次计数，供终态调用汇总与 OTel span 标签消费
+        if (retryAttempt == 0) {
+            execCtx.incrementRound();
+        }
         String conversationId = params != null ? params.getConversationId() : null;
         log.debug("Scheduling round: {}, conversationId={}, retryAttempt={}", round, conversationId, retryAttempt);
 
@@ -693,6 +713,7 @@ public class AgentLoopExecutor {
                     finishRound(messages, sink, roundState, roundCounter, params, execCtx, query, durationMs);
                 })
                 .onErrorResume(err -> {
+                    sessionPersister.recordLlmError(execCtx, llmInvoker.getLastRequestJson(), (int) roundCounter.get(), retryAttempt, maxRetries, err.getMessage());
                     if (!hookManager.isEmpty()) {
                         hookManager.fireEvent(new ErrorEvent(
                                 execCtx, err, "reasoning", retryAttempt, retryAttempt < maxRetries));
@@ -733,6 +754,11 @@ public class AgentLoopExecutor {
             var usage = chunk.getMetadata().getUsage();
             state.promptTokens = usage.getPromptTokens();
             state.completionTokens = usage.getCompletionTokens();
+        }
+        // 持续刷新本次调用实际使用的模型名，终态时随调用记录落库
+        if (chunk.getMetadata() != null && chunk.getMetadata().getModel() != null
+                && !chunk.getMetadata().getModel().isEmpty()) {
+            execCtx.setModelName(chunk.getMetadata().getModel());
         }
         if (chunk.getResult() != null && chunk.getResult().getMetadata() != null) {
             String reason = chunk.getResult().getMetadata().getFinishReason();
@@ -830,7 +856,8 @@ public class AgentLoopExecutor {
         if (maxRounds > 0 && roundCounter.get() >= maxRounds) {
             log.debug("Max rounds reached, forcing final answer: conversationId={}", conversationId);
             // 记录 trace（工具调用轮，达到上限）
-            sessionPersister.recordTrace(execCtx, round, requestJson, sessionPersister.serializeToolCalls(safeToolCalls), null,
+            sessionPersister.recordTrace(execCtx, round, requestJson, sessionPersister.serializeToolCalls(safeToolCalls),
+                    state.reasoningBuffer.length() > 0 ? state.reasoningBuffer.toString() : null,
                     state.promptTokens, state.completionTokens, durationMs);
             forceFinalStream(messages, sink, params, execCtx, query);
             return;
@@ -860,7 +887,8 @@ public class AgentLoopExecutor {
             sessionPersister.persistPauseState(pauseState);
 
             // 记录 trace（暂停前）
-            sessionPersister.recordTrace(execCtx, round, requestJson, sessionPersister.serializeToolCalls(safeToolCalls), null,
+            sessionPersister.recordTrace(execCtx, round, requestJson, sessionPersister.serializeToolCalls(safeToolCalls),
+                    state.reasoningBuffer.length() > 0 ? state.reasoningBuffer.toString() : null,
                     state.promptTokens, state.completionTokens, durationMs);
 
             log.debug("Stream paused at round {}, pending tools: {}", roundCounter.get(), pending.size());
@@ -873,7 +901,8 @@ public class AgentLoopExecutor {
         }
 
         // 记录 trace（工具调用轮）
-        sessionPersister.recordTrace(execCtx, round, requestJson, sessionPersister.serializeToolCalls(safeToolCalls), null,
+        sessionPersister.recordTrace(execCtx, round, requestJson, sessionPersister.serializeToolCalls(safeToolCalls),
+                state.reasoningBuffer.length() > 0 ? state.reasoningBuffer.toString() : null,
                 state.promptTokens, state.completionTokens, durationMs);
 
         toolCallExecutor.executeToolCallsAsync(sink, safeToolCalls, messages, params, execCtx, () -> {
@@ -970,6 +999,7 @@ public class AgentLoopExecutor {
                     sink.tryEmitComplete();
                 })
                 .onErrorResume(err -> {
+                    sessionPersister.recordLlmError(execCtx, llmInvoker.getLastRequestJson(), execCtx.getTotalRounds(), retryAttempt, maxRetries, err.getMessage());
                     if (!hookManager.isEmpty()) {
                         hookManager.fireEvent(new ErrorEvent(
                                 execCtx, err, "forceFinal", retryAttempt, retryAttempt < maxRetries));

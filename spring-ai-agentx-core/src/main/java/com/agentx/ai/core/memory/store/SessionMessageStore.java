@@ -32,6 +32,7 @@ public class SessionMessageStore {
                 id              BIGINT       NOT NULL  COMMENT '主键ID',
                 conversation_id VARCHAR(100) NOT NULL  COMMENT '会话窗口ID',
                 session_id      VARCHAR(100) NOT NULL  COMMENT '本次调用ID',
+                user_id         VARCHAR(100) DEFAULT NULL COMMENT '用户ID',
                 state_key       VARCHAR(255) NOT NULL  COMMENT '状态键: original_messages / working_messages / offload_context',
                 item_index      INT          NOT NULL DEFAULT 0 COMMENT '消息在状态键内的序号',
                 state_data      LONGTEXT     NOT NULL  COMMENT '消息JSON（MessageJsonSerializer 序列化）',
@@ -50,8 +51,8 @@ public class SessionMessageStore {
             """;
 
     private static final String INSERT_SQL = """
-            INSERT INTO agentx_session (id, conversation_id, session_id, state_key, item_index, state_data, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO agentx_session (id, conversation_id, session_id, user_id, state_key, item_index, state_data, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             """;
 
     private static final String SELECT_SQL = """
@@ -145,7 +146,7 @@ public class SessionMessageStore {
      * 终态时调用：一次调用新增的消息一次性写入，避免 ReAct 循环中频繁 DB I/O。
      * system 消息属于运行时外部上下文，不进入 agentx_session。
      */
-    public void appendMessages(String conversationId, long sessionId,
+    public void appendMessages(String conversationId, long sessionId, String userId,
                                String stateKey, List<Message> messages) {
         if (conversationId == null || stateKey == null || messages == null || messages.isEmpty()) {
             return;
@@ -164,7 +165,7 @@ public class SessionMessageStore {
         for (int i = 0; i < persistedMessages.size(); i++) {
             String data = MessageJsonSerializer.toJson(List.of(persistedMessages.get(i)));
             batchArgs.add(new Object[]{
-                    IdWorker.getId(), conversationId, sessionIdStr, stateKey, startIndex + i, data
+                    IdWorker.getId(), conversationId, sessionIdStr, userId, stateKey, startIndex + i, data
             });
         }
         jdbcTemplate.batchUpdate(INSERT_SQL, batchArgs);
@@ -176,7 +177,7 @@ public class SessionMessageStore {
      * 覆盖写：先删除指定 conversationId+stateKey 的全部行，再批量插入。
      * 用于 working_messages 等需要随压缩演进的视图状态。
      */
-    public void replaceMessages(String conversationId, long sessionId,
+    public void replaceMessages(String conversationId, long sessionId, String userId,
                                 String stateKey, List<Message> messages) {
         if (conversationId == null || stateKey == null) {
             return;
@@ -184,7 +185,7 @@ public class SessionMessageStore {
         List<Message> persistedMessages = filterPersistableMessages(messages);
         ensureInitialized();
         jdbcTemplate.update(DELETE_BY_CONV_KEY_SQL, conversationId, stateKey);
-        appendMessages(conversationId, sessionId, stateKey, persistedMessages);
+        appendMessages(conversationId, sessionId, userId, stateKey, persistedMessages);
         log.debug("Replaced state: conversationId={}, stateKey={}, rows={}",
                 conversationId, stateKey, persistedMessages.size());
     }
@@ -194,15 +195,15 @@ public class SessionMessageStore {
      * state_data 格式：{"uuid":"...","message":[{...}]}
      * 用于保存各压缩层替换下来的原文，配合 context_reload 工具按需取回。
      */
-    public void appendOffload(String conversationId, long sessionId,
+    public void appendOffload(String conversationId, long sessionId, String userId,
                               String uuid, Message message) {
         if (message == null) {
             return;
         }
-        appendOffloadMessages(conversationId, sessionId, uuid, List.of(message));
+        appendOffloadMessages(conversationId, sessionId, userId, uuid, List.of(message));
     }
 
-    public void appendOffloadMessages(String conversationId, long sessionId,
+    public void appendOffloadMessages(String conversationId, long sessionId, String userId,
                                       String uuid, List<Message> messages) {
         if (conversationId == null || uuid == null || messages == null || messages.isEmpty()) {
             return;
@@ -222,7 +223,7 @@ public class SessionMessageStore {
             throw new IllegalStateException("Failed to serialize offload payload", e);
         }
         jdbcTemplate.update(INSERT_SQL,
-                IdWorker.getId(), conversationId, String.valueOf(sessionId),
+                IdWorker.getId(), conversationId, String.valueOf(sessionId), userId,
                 "offload_context", nextIndex, data);
         log.debug("Offloaded messages: conversationId={}, uuid={}, itemIndex={}, count={}",
                 conversationId, uuid, nextIndex, messages.size());

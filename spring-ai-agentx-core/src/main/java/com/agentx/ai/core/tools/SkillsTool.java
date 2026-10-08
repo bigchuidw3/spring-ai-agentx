@@ -5,7 +5,6 @@ import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.ai.tool.function.FunctionToolCallback;
 import org.springframework.core.io.Resource;
-import org.springframework.util.Assert;
 
 import java.io.IOException;
 import java.net.URL;
@@ -160,8 +159,8 @@ public class SkillsTool {
 		}
 
 		public ToolCallback build() {
-			Assert.notEmpty(this.skills, "至少需要配置一个技能目录或资源");
-
+			// 允许空技能清单：SkillsTool 始终可注册（技能加载入口稳定），
+			// 模型调用后得到"无可用技能"，避免退化到 tool_search 反复检索
 			String skillsXml = this.skills.stream().map(Skill::toXml).collect(Collectors.joining("\n"));
 
 			return FunctionToolCallback.builder("Skill", new SkillsFunction(toSkillsMap(this.skills)))

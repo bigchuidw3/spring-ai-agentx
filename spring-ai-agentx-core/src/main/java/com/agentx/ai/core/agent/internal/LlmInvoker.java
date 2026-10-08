@@ -1,5 +1,6 @@
 package com.agentx.ai.core.agent.internal;
 
+import com.agentx.ai.core.advisors.RequestLoggingAdvisor;
 import com.agentx.ai.core.exception.AgentErrorCode;
 import com.agentx.ai.core.exception.AgentException;
 import com.agentx.ai.core.model.AgentStreamEvent;
@@ -149,6 +150,19 @@ public class LlmInvoker {
 
     public int getMaxRetries() {
         return maxRetries;
+    }
+
+    /**
+     * 获取最近一次请求的完整入参 JSON。流失败时 advisor context 可能尚未写入，
+     * 从 RequestLoggingAdvisor 直接读取（请求发出前已写入）。
+     */
+    public String getLastRequestJson() {
+        for (Advisor advisor : advisors) {
+            if (advisor instanceof RequestLoggingAdvisor rla) {
+                return rla.getLastRequestJson();
+            }
+        }
+        return null;
     }
 
     /**

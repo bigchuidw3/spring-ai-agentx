@@ -30,7 +30,10 @@ public final class ContextCompactionHook implements AgentHook {
                     ctx.getMessages(),
                     ctx.getQuery(),
                     ctx.getConversationId(),
-                    ctx.getSessionId());
+                    ctx.getSessionId(),
+                    ctx.getUserId(),
+                    ctx.getTotalRounds(),
+                    ctx.getTraceManager());
         }
         return event;
     }

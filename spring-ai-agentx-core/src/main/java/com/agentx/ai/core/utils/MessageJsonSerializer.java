@@ -128,6 +128,14 @@ public final class MessageJsonSerializer {
             if (reasoning != null && !reasoning.isEmpty()) {
                 map.put("reasoning_content", reasoning);
             }
+            String errorType = extractMetadata(assistantMessage, "errorType");
+            if (errorType != null && !errorType.isEmpty()) {
+                map.put("errorType", errorType);
+            }
+            String errorDetail = extractMetadata(assistantMessage, "errorDetail");
+            if (errorDetail != null && !errorDetail.isEmpty()) {
+                map.put("errorDetail", errorDetail);
+            }
         } else {
             map.put("content", message.getText());
         }
@@ -138,18 +146,20 @@ public final class MessageJsonSerializer {
      * 从 AssistantMessage metadata 提取思考内容（兼容 reasoningContent / reasoning_content 两个键）。
      */
     private static String extractReasoningContent(AssistantMessage message) {
+        String reasoning = extractMetadata(message, "reasoningContent");
+        return reasoning != null ? reasoning : extractMetadata(message, "reasoning_content");
+    }
+
+    /**
+     * 从 AssistantMessage metadata 提取指定键的字符串值。
+     */
+    private static String extractMetadata(AssistantMessage message, String key) {
         Map<String, Object> metadata = message.getMetadata();
         if (metadata == null || metadata.isEmpty()) {
             return null;
         }
-        Object rc = metadata.get("reasoningContent");
-        if (rc == null) {
-            rc = metadata.get("reasoning_content");
-        }
-        if (rc instanceof String s && !s.isEmpty()) {
-            return s;
-        }
-        return null;
+        Object value = metadata.get(key);
+        return value instanceof String s && !s.isEmpty() ? s : null;
     }
 
     private static List<Map<String, Object>> toToolCallMaps(List<AssistantMessage.ToolCall> toolCalls) {
@@ -245,6 +255,16 @@ public final class MessageJsonSerializer {
         if ("assistant".equalsIgnoreCase(role)) {
             List<AssistantMessage.ToolCall> toolCalls = parseToolCalls(item.get("tool_calls"));
             Map<String, Object> props = buildReasoningProperties(asString(item.get("reasoning_content")));
+            String errorType = asString(item.get("errorType"));
+            if (errorType != null && !errorType.isEmpty()) {
+                props = new LinkedHashMap<>(props);
+                props.put("errorType", errorType);
+            }
+            String errorDetail = asString(item.get("errorDetail"));
+            if (errorDetail != null && !errorDetail.isEmpty()) {
+                props = new LinkedHashMap<>(props);
+                props.put("errorDetail", errorDetail);
+            }
             if (toolCalls != null && !toolCalls.isEmpty()) {
                 return AssistantMessage.builder()
                         .content(content != null ? content : "")

@@ -11,6 +11,7 @@ import java.io.IOException;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
@@ -48,6 +49,8 @@ public class DockerBackend implements SandboxBackend {
     private final int memoryMb;
     private final int cpuCount;
     private final long executionTimeoutMs;
+    /** 挂载列表（"hostPath:containerPath"），创建容器时逐个 -v 挂载 */
+    private final List<String> mounts;
 
     private DockerBackend(Builder b) {
         this.image = b.image;
@@ -56,6 +59,7 @@ public class DockerBackend implements SandboxBackend {
         this.memoryMb = b.memoryMb;
         this.cpuCount = b.cpuCount;
         this.executionTimeoutMs = b.executionTimeoutMs;
+        this.mounts = List.copyOf(b.mounts);
     }
 
     public static Builder builder() {
@@ -79,7 +83,7 @@ public class DockerBackend implements SandboxBackend {
         DockerClient client = new DockerClient(executionTimeoutMs);
 
         client.createContainer(containerName, image, workspaceRoot,
-                networkDisabled, memoryMb, cpuCount);
+                networkDisabled, memoryMb, cpuCount, mounts);
         client.startContainer(containerName);
 
         try {
@@ -125,7 +129,7 @@ public class DockerBackend implements SandboxBackend {
         DockerClient client = new DockerClient(executionTimeoutMs);
 
         client.createContainer(containerName, image, workspaceRoot,
-                networkDisabled, memoryMb, cpuCount);
+                networkDisabled, memoryMb, cpuCount, mounts);
         client.startContainer(containerName);
 
         try {
@@ -148,6 +152,12 @@ public class DockerBackend implements SandboxBackend {
     public void destroy(Sandbox sandbox) {
         DockerSandbox ds = cast(sandbox);
         ds.getDockerClient().removeContainer(ds.getContainerName());
+    }
+
+    @Override
+    public void destroyByName(String containerName) {
+        DockerClient client = new DockerClient(executionTimeoutMs);
+        client.removeContainer(containerName);
     }
 
     // ==================== 内部方法 ====================
@@ -194,6 +204,7 @@ public class DockerBackend implements SandboxBackend {
         private int memoryMb = DEFAULT_MEMORY_MB;
         private int cpuCount = DEFAULT_CPU_COUNT;
         private long executionTimeoutMs = DEFAULT_EXECUTION_TIMEOUT_MS;
+        private final List<String> mounts = new ArrayList<>();
 
         /**
          * 容器镜像（要求镜像内含 sh / tar / base64 / ls 等基础命令）。
@@ -234,6 +245,20 @@ public class DockerBackend implements SandboxBackend {
          */
         public Builder executionTimeoutMs(long ms) {
             this.executionTimeoutMs = ms;
+            return this;
+        }
+
+        /**
+         * 添加一个宿主机目录到沙箱容器的 bind mount。
+         *
+         * <p>调用方按需声明多个挂载，框架不关心具体路径语义，创建容器时逐个转成
+         * {@code docker create -v hostPath:containerPath}。
+         *
+         * <p>注意：沙箱容器由宿主机 dockerd 创建，{@code hostPath} 必须是<b>宿主机</b>真实路径，
+         * 而非应用容器内的挂载路径。
+         */
+        public Builder mount(String hostPath, String containerPath) {
+            this.mounts.add(hostPath + ":" + containerPath);
             return this;
         }
 

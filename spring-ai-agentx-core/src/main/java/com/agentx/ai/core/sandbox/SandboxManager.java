@@ -59,7 +59,7 @@ public class SandboxManager {
      */
     public Sandbox acquire(AgentRuntimeContext ctx) throws Exception {
         String scopeKey = computeScopeKey(ctx);
-        String containerName = com.agentx.ai.core.sandbox.docker.ContainerNameUtil.toContainerName(scopeKey);
+        String containerName = ContainerNameUtil.toContainerName(scopeKey);
 
         // 1. 复用已运行容器（resume 场景）
         Sandbox existing = backend.findExisting(containerName);
@@ -84,15 +84,22 @@ public class SandboxManager {
     }
 
     /**
-     * 释放沙箱（快照 + 销毁）。
+     * 释放沙箱。
      *
-     * <p>快照成功（或后端不需要快照）才销毁容器；快照失败时保留容器，
-     * 供下次 acquire 的 findExisting 复用，避免 workspace 状态丢失。
+     * <p>常驻模式（{@code autoRelease=false}）：不销毁容器，直接返回，
+     * workspace 内容保留在容器内，下次 acquire 的 findExisting 复用。
+     *
+     * <p>自动关闭模式（默认）：快照成功（或后端不需要快照）才销毁容器；
+     * 快照失败时保留容器，供下次 acquire 的 findExisting 复用，避免 workspace 状态丢失。
      *
      * @param sandbox 沙箱实例
      * @param ctx     运行时上下文
      */
     public void release(Sandbox sandbox, AgentRuntimeContext ctx) {
+        if (!config.isAutoRelease()) {
+            log.info("[SandboxManager] 常驻模式，保留容器: {}", sandbox.getContainerName());
+            return;
+        }
         String scopeKey = computeScopeKey(ctx);
         try {
             InputStream tar = backend.exportWorkspace(sandbox);

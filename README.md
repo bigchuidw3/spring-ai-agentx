@@ -2,9 +2,9 @@
 
 基于原生 Spring AI 的智能体（Agent）开发框架，提供 ReAct 执行引擎、当前会话记忆、长期记忆、上下文压缩、工具调度、Human-in-the-Loop 等核心能力，帮助开发者快速构建可落地的 Java Agent。
 
-> 当前发布版本：1.0.1-M1
+> 当前发布版本：1.0.1-M2
 >
-> 历史版本：1.0.0-M2
+> 历史版本：1.0.1-M1 / 1.0.0-M2 / 1.0.0-M1
 >
 > JDK 21+ | Spring Boot 3.5.x | Spring AI 1.1.0
 
@@ -34,14 +34,14 @@ Spring AI AgentX 是一款面向 Java 开发者的 AI Agent 开发框架。框�
 | Human-in-the-Loop | `askUser(true)` 默认注册内置 `ask_user` 工具与对应暂停拦截；支持审批类工具与输入类工具两种语义 |
 | 中断与恢复 | `agentx_pause_state` 持久化暂停快照，统一支持 `HITL_TOOL_REQUEST` 与 `USER_INTERRUPT` 两种暂停原因 |
 | SubAgent 子代理 | 子代理以 `call_{name}` 工具形式委派，拥有独立 context window；父 Agent 是 session 持久化边界 |
-| TraceAudit 追踪审计 | `agentx_trace` 记录每轮 LLM 请求、响应、思考内容与 token 消耗 |
+| TraceAudit 追踪审计 | `agentx_trace` 统一 Span 模型（LLM / TOOL / COMPACT 一张表），记录每轮请求响应原文、工具入参出参、token 与耗时，全链路带 `user_id` |
 | TodoWrite 任务追踪 | 结构化任务列表工具，支持流式 TodoProgress 事件 |
 | Skills 技能体系 | 按需加载技能内容，减少大段提示词常驻上下文 |
 | 思考模型适配 | 支持 `<think/>` 标签和 `reasoning_content` 两种思考输出格式，内置 `DeepSeekV4ChatModel` 兼容修复 |
 | 异常处理与重试 | 内置透明重试机制，统一异常处理（AgentException + AgentErrorCode） |
 | Hook 生命周期机制 | 7 个 Hook 事件覆盖 Agent 全生命周期，支持 Before* 干预输入和 After* 观测结果，通过 AgentRuntimeContext 操控共享状态 |
-| 可观测性 | 基于 OpenTelemetry 标准将 Agent 调用链路输出为 trace 树；`TracingHook` 产出 `agentx` 根/工具 span，`ChatContentObservationHandler` 补齐 LLM span 的 prompt/completion，可对接 Opik / Langfuse / Jaeger 等任意 OTLP 平台 |
-| 沙箱隔离执行 | BashTool / FileSystemTools / GrepTool 在 Docker 容器或本地受限目录中执行；调用结束快照持久化，下次调用自动恢复；支持 CONVERSATION / USER 隔离级别与严格模式 fail-closed（TODO 待修复：容器内无法派生沙箱） |
+| 可观测性 | 基于 OpenTelemetry 标准将 Agent 调用链路输出为 trace 树；`TracingHook` 产出 `agentx` 根/工具 span，`ChatContentObservationHandler` 补齐 LLM span 的 prompt/completion，可对接 Opik / Langfuse / Jaeger 等任意 OTLP 平台；自建审计三表全链路 `user_id` 数据隔离 |
+| 沙箱隔离执行 | BashTool / FileSystemTools / GrepTool 在 Docker 容器或本地受限目录中执行；支持快照持久化自动恢复、常驻模式（`autoRelease`）、宿主机目录挂载（`mount`）、按容器名手动销毁（`destroyByName`）；CONVERSATION / USER 隔离级别与严格模式 fail-closed |
 
 ## RAG 模块
 
@@ -74,6 +74,21 @@ v1.0.1 重点是把会话存储模型、上下文压缩、HITL、暂停恢复这
 
 详细差异说明见 [docs/core/v1_1](docs/core/v1_1) 下的专题文档。
 
+## v1.0.1-M2 相对 v1.0.1-M1 做了哪些调整
+
+M2 聚焦沙箱执行模型、可观测性数据隔离与 Trace 审计模型：
+
+| 模块 | 调整 |
+|------|------|
+| 沙箱生命周期 | 新增 `autoRelease` 开关：`false` 时容器常驻、不随会话销毁，配合 `destroyByName` 按容器名手动回收，省去高频交互的快照往返开销 |
+| 沙箱文件打通 | `DockerBackend.mount(hostPath, containerPath)`：宿主机目录 bind mount 进沙箱容器，两侧文件实时互通（同一份数据，非拷贝同步） |
+| 数据隔离 | `agentx_trace` / `agentx_session` 新增 `user_id` 列，从 `RunnableParams.userId` 全链路透传（含上下文压缩 offload 链路，`OffloadStore` 接口签名变更，自定义实现需迁移） |
+| 统一 Span 模型 | `agentx_trace` 重构为 LLM / TOOL / COMPACT 三类 Span 一张表（新增 `span_type` / `tool_name` / `tool_call_id` / `compact_id`，删除 `trace_id` / `parent_span_id`），`ORDER BY id` 即线性还原执行序列 |
+| 调用记录观测列 | `agentx_conversation` 新增耗时 / 轮次 / 工具次数 / token / 模型名共 8 个汇总列，终态一次写入 |
+| 迁移策略 | 框架不再自动执行 ALTER，老库升级需手动执行增量 DDL（命令见升级指南） |
+
+沙箱与可观测性的从 0 到 1 使用教程、表结构升级命令见 [docs/core/v1_1_M2](docs/core/v1_1_M2)。
+
 ## 关于上下文压缩相对 AgentScope 的优化
 
 AgentScope（ASJ）本身就提供了 6 层渐进式上下文压缩思路，框架在这套思路之上做了几点关键优化。这里只做简要说明，详细差异请看 [11-上下文压缩](docs/core/v1_1/11-上下文压缩.md)。
@@ -95,8 +110,8 @@ v1.0.1 的 L1 改为：
 | 层级 | 是否调 LLM | 处理区 |
 |------|------------|--------|
 | L1 历史工具调用列表 | 否 | 历史区 |
-| L2 历史大消息 offload（保留 `lastKeep`） | 否 | 历史区 |
-| L3 历史大消息 offload（不保留 `lastKeep`） | 否 | 历史区 |
+| L2 历史大消息 offload（保留 `lastKeep` 保护区） | 否 | 历史区 |
+| L3 大消息 offload（放宽到最新工具调用边界） | 否 | 历史区 + 当前轮已看过的工具结果 |
 | L4 历史轮次摘要 | 是 | 历史区 |
 | L5 当前轮大消息摘要 | 是 | 当前任务区 |
 | L6 当前轮整体压缩 | 是 | 当前任务区 |
@@ -131,7 +146,7 @@ mvn clean install -DskipTests
 <dependency>
     <groupId>com.agentx.ai</groupId>
     <artifactId>spring-ai-agentx-core</artifactId>
-    <version>1.0.1-M1</version>
+    <version>1.0.1-M2</version>
 </dependency>
 ```
 
@@ -199,6 +214,17 @@ AgentResult result = agent.callForResult("帮我查一下北京天气，并给�
 
 推荐阅读顺序：05 → 11 → 13 → 19 → 18 → 20 → 21 → 22。
 
+## v1.0.1-M2 文档（v1_1_M2）
+
+M2 调整功能的从 0 到 1 教程与升级指南，放在 [docs/core/v1_1_M2](docs/core/v1_1_M2) 下：
+
+| 文档 | 说明 |
+|------|------|
+| [01-沙箱隔离执行](docs/core/v1_1_M2/01-沙箱隔离执行.md) | 从 0 到 1 教程：全部配置方法逐项说明、常驻模式（autoRelease）、宿主机目录挂载（mount）、手动销毁（destroyByName）、完整生产示例与常见问题 |
+| [02-可观测性](docs/core/v1_1_M2/02-可观测性.md) | 从 0 到 1 接入：六步接入（依赖 / yml / ChatModel / ReactAgent / 降噪 / userId）、自建审计三表与统一 Span 模型、按 user_id 隔离查询 |
+| [03-表结构变更与升级](docs/core/v1_1_M2/03-表结构变更与升级.md) | M1 → M2 全部表结构变更清单、两种升级方式（删表重建 / ALTER 增量）、完整可执行命令、老数据回填与校验 |
+| [04-上下文压缩与数据隔离](docs/core/v1_1_M2/04-上下文压缩与数据隔离.md) | 压缩链路全链 userId 透传（OffloadStore 接口变更与自定义实现迁移）、L3 层处理区语义澄清（最新工具调用边界） |
+
 ## 其他专题文档（沿用 v1.0.0-M2）
 
 下列专题在 v1.0.1 中未做架构级调整，仍然沿用 v1.0.0-M2 的口径，文档放在 [docs/core/v1_M2](docs/core/v1_0_M2) 下：
@@ -238,7 +264,16 @@ AgentResult result = agent.callForResult("帮我查一下北京天气，并给�
 
 ## 版本路线图
 
-### v1.0.1-M1（当前发布版本）
+### v1.0.1-M2（当前发布版本）
+
+- 沙箱常驻模式（`autoRelease`）与按容器名手动销毁（`destroyByName`）
+- 沙箱宿主机目录挂载（`mount`），宿主机与沙箱文件双向实时互通
+- 全链路 `user_id` 数据隔离（`agentx_trace` / `agentx_session` + 上下文压缩 offload 链路）
+- Trace 统一 Span 模型（LLM / TOOL / COMPACT 一张表）
+- `agentx_conversation` 8 个观测汇总列
+- 沙箱命名工具（`ContainerNameUtil`）下沉通用包，`SandboxManager` 与 docker 实现解耦
+
+### v1.0.1-M1（历史版本）
 
 - 当前会话记忆三态模型（`original_messages` / `working_messages` / `offload_context`）
 - 新增 `agentx_conversation` 表，独立记录调用边界

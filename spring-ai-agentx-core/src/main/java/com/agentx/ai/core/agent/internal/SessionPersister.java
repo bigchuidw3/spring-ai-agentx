@@ -73,7 +73,7 @@ public class SessionPersister {
         }
 
         if (traceStore == null || !enableTrace || conversationId == null) return;
-        execCtx.setTraceManager(new TraceManager(traceStore, sessionId, conversationId));
+        execCtx.setTraceManager(new TraceManager(traceStore, sessionId, conversationId, userId));
     }
 
     /**
@@ -84,6 +84,8 @@ public class SessionPersister {
         boolean isInterruptResume = state.getReason() == PauseReason.USER_INTERRUPT
                 && resumeQuery != null && !resumeQuery.isBlank();
         execCtx.restoreTokens(state.getTotalPromptTokens(), state.getTotalCompletionTokens());
+        // 恢复运行时轮次计数，保证跨暂停/恢复的 rounds 与 trace round 连续
+        execCtx.setTotalRounds(state.getCurrentRound());
 
         if (isInterruptResume) {
             long newSessionId = IdWorker.getId();
@@ -94,7 +96,7 @@ public class SessionPersister {
                 conversationStore.saveStart(conversationId, newSessionId, userId, resumeQuery);
             }
             if (traceStore != null && enableTrace && conversationId != null) {
-                execCtx.setTraceManager(new TraceManager(traceStore, newSessionId, conversationId));
+                execCtx.setTraceManager(new TraceManager(traceStore, newSessionId, conversationId, userId));
             }
             return resumeQuery;
         }
@@ -103,7 +105,8 @@ public class SessionPersister {
         if (traceStore != null && enableTrace) {
             RunnableParams params = state.getParams();
             String conversationId = params != null ? params.getConversationId() : null;
-            execCtx.setTraceManager(new TraceManager(traceStore, state.getSessionId(), conversationId));
+            String userId = params != null ? params.getUserId() : null;
+            execCtx.setTraceManager(new TraceManager(traceStore, state.getSessionId(), conversationId, userId));
         }
         return state.getQuery();
     }
@@ -122,6 +125,33 @@ public class SessionPersister {
         if (tm == null) return;
         tm.trace(round, requestJson, outputData, think,
                 (int) promptTokens, (int) completionTokens, durationMs);
+    }
+
+    /**
+     * 记录一次 LLM 调用失败：错误消息追加到 original_messages（chat 页面刷新后还原错误气泡），
+     * 并落一条 success=0 的 LLM trace span（审计）。错误消息只进 original_messages、不进工作链，避免污染 LLM 上下文。
+     */
+    public void recordLlmError(AgentRuntimeContext execCtx, String requestJson, int round, int retryAttempt, int maxRetries, String errorMessage) {
+        String title = retryAttempt < maxRetries
+                ? "LLM 调用失败，正在重试 (" + (retryAttempt + 1) + "/" + maxRetries + ")"
+                : "LLM 调用失败（已重试 " + maxRetries + " 次）";
+
+        if (enableSession && execCtx.getOriginalMessagesSnapshot() != null) {
+            Map<String, Object> props = new LinkedHashMap<>();
+            props.put("errorType", "error");
+            if (errorMessage != null && !errorMessage.isBlank()) {
+                props.put("errorDetail", errorMessage);
+            }
+            execCtx.appendOriginalMessage(AssistantMessage.builder()
+                    .content(title)
+                    .properties(props)
+                    .build());
+        }
+
+        TraceManager tm = execCtx.getTraceManager();
+        if (tm != null) {
+            tm.traceError(round, requestJson, 0, errorMessage);
+        }
     }
 
     /**
@@ -149,6 +179,7 @@ public class SessionPersister {
      */
     public void persistOnTerminal(AgentRuntimeContext execCtx, List<Message> messages, SignalType signal) {
         String conversationId = execCtx.getConversationId();
+        String userId = execCtx.getUserId();
         if (conversationId == null || !enableSession || sessionMessageStore == null) {
             return;
         }
@@ -174,14 +205,20 @@ public class SessionPersister {
                     : List.of();
             if (!thisCallMessages.isEmpty()) {
                 sessionMessageStore.appendMessages(
-                        conversationId, execCtx.getSessionId(),
+                        conversationId, execCtx.getSessionId(), userId,
                         "original_messages", thisCallMessages);
             }
             sessionMessageStore.replaceMessages(
-                    conversationId, execCtx.getSessionId(),
+                    conversationId, execCtx.getSessionId(), userId,
                     "working_messages", messages);
             if (conversationStore != null) {
-                conversationStore.updateStatus(execCtx.getSessionId(), status);
+                long[] toolStats = countToolSpans(execCtx);
+                conversationStore.updateTerminal(execCtx.getSessionId(), status,
+                        execCtx.getTotalRounds(),
+                        (int) toolStats[0], (int) toolStats[1],
+                        execCtx.getTotalPromptTokens(), execCtx.getTotalCompletionTokens(),
+                        System.currentTimeMillis() - execCtx.getCallStartedAt(),
+                        execCtx.getModelName());
             }
             if ("completed".equals(status) && memoryPersistor != null && !thisCallMessages.isEmpty()) {
                 memoryPersistor.persist(execCtx.getParams(), thisCallMessages);
@@ -189,6 +226,19 @@ public class SessionPersister {
         } catch (Exception e) {
             log.error("Failed to persist terminal session: {}", e.getMessage());
         }
+    }
+
+    /**
+     * 统计本次调用的工具执行次数与失败次数：从 trace 的 TOOL Span 按 session_id 计数，
+     * HITL 暂停/恢复复用同一 session 时天然累计。trace 未启用时返回 0。
+     */
+    private long[] countToolSpans(AgentRuntimeContext execCtx) {
+        if (traceStore == null || !enableTrace) {
+            return new long[]{0, 0};
+        }
+        return new long[]{
+                traceStore.countTools(execCtx.getSessionId()),
+                traceStore.countToolFailures(execCtx.getSessionId())};
     }
 
     /**

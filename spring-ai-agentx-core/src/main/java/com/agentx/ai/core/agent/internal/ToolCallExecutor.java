@@ -1,5 +1,6 @@
 package com.agentx.ai.core.agent.internal;
 
+import com.agentx.ai.core.context.compress.OffloadStore;
 import com.agentx.ai.core.hook.HookManager;
 import com.agentx.ai.core.hook.AfterToolExecutionEvent;
 import com.agentx.ai.core.hook.BeforeToolExecutionEvent;
@@ -48,17 +49,30 @@ public class ToolCallExecutor {
     private static final Set<String> APPROVAL_KEYWORDS = Set.of(
             "ok", "yes", "y", "好", "好的", "确认", "同意", "是", "是的", "approve", "confirm");
 
+    /** 工具结果源头卸载时，首尾各保留的预览字符数。 */
+    private static final int TOOL_RESULT_PREVIEW_CHARS = 1000;
+
+    /** 不参与工具结果源头卸载的工具：自带分页或返回天然小，卸载反而造成「读 → 卸载 → 取回」循环。 */
+    private static final Set<String> EVICTION_EXCLUDED_TOOLS = Set.of(
+            "context_reload", "read_file", "write_file", "edit_file",
+            "list_files", "glob_files", "grep", "TodoWrite");
+
     private final Map<String, ToolCallback> toolMap;
     private final ObjectMapper objectMapper;
     private final String askUserToolName;
     private final HookManager hookManager;
+    private final OffloadStore offloadStore;
+    private final int toolResultEvictionChars;
 
     public ToolCallExecutor(Map<String, ToolCallback> toolMap, ObjectMapper objectMapper,
-                            String askUserToolName, HookManager hookManager) {
+                            String askUserToolName, HookManager hookManager,
+                            OffloadStore offloadStore, int toolResultEvictionChars) {
         this.toolMap = toolMap;
         this.objectMapper = objectMapper;
         this.askUserToolName = askUserToolName;
         this.hookManager = hookManager;
+        this.offloadStore = offloadStore;
+        this.toolResultEvictionChars = toolResultEvictionChars;
     }
 
     /**
@@ -81,6 +95,7 @@ public class ToolCallExecutor {
                                                   AgentRuntimeContext runtimeCtx) {
         String toolName = toolCall.name();
         String argsJson = toolCall.arguments();
+        long toolStart = System.currentTimeMillis();
 
         // 无参数工具：LLM 可能返回 null 或空字符串，默认为空 JSON 对象
         if (argsJson == null || argsJson.isBlank()) {
@@ -90,7 +105,10 @@ public class ToolCallExecutor {
         ToolCallback callback = toolMap.get(toolName);
 
         if (callback == null) {
-            return errorResult(toolName, "不存在名为 '" + toolName + "' 的工具");
+            String notFound = "不存在名为 '" + toolName + "' 的工具";
+            traceToolSpan(runtimeCtx, toolCall, argsJson, null, false,
+                    System.currentTimeMillis() - toolStart, notFound);
+            return errorResult(toolName, notFound);
         }
 
         // 先按工具的 inputSchema 过滤，只注入该工具真实声明的字段（避免 MCP 服务端严格校验报错）
@@ -99,9 +117,9 @@ public class ToolCallExecutor {
         log.debug("Executing tool: {} with args: {}", toolName, argsJson);
 
         Object result;
+        String effectiveArgs = argsJson;
         try {
             ToolContext toolContext = buildToolContext(params, sink, runtimeCtx);
-            String effectiveArgs = argsJson;
 
             if (runtimeCtx != null && !hookManager.isEmpty()) {
                 BeforeToolExecutionEvent event = new BeforeToolExecutionEvent(
@@ -120,6 +138,8 @@ public class ToolCallExecutor {
         } catch (Exception e) {
             log.error("Tool '{}' execution failed: {}", toolName, e.getMessage(), e);
             String hint = buildErrorHint(toolName, e);
+            traceToolSpan(runtimeCtx, toolCall, effectiveArgs, null, false,
+                    System.currentTimeMillis() - toolStart, hint);
             return errorResult(toolName, hint);
         }
 
@@ -128,7 +148,75 @@ public class ToolCallExecutor {
         if (rawResult.isBlank()) {
             rawResult = "（工具无返回内容）";
         }
-        return new ToolExecutionResult(rawResult);
+        traceToolSpan(runtimeCtx, toolCall, effectiveArgs, rawResult, true,
+                System.currentTimeMillis() - toolStart, null);
+        // 超长工具结果源头卸载：offload 全文，上下文只留首尾预览 + context_reload 提示（trace 已记录完整结果）
+        String contextResult = evictIfNeeded(toolName, toolCall.id(), rawResult, params, runtimeCtx);
+        return new ToolExecutionResult(contextResult);
+    }
+
+    /**
+     * 工具结果源头卸载：单条结果超过阈值时 offload 全文，上下文只留首尾预览 + context_reload 提示。
+     * 与 ContextCompactor 正交——压缩管「深」（消息累积），这里管「宽」（单条超大）。
+     * 仅在 trace 记录完整输出之后调用，审计链路保留完整结果。
+     */
+    private String evictIfNeeded(String toolName, String toolCallId, String rawResult,
+                                 RunnableParams params, AgentRuntimeContext runtimeCtx) {
+        if (toolResultEvictionChars <= 0 || EVICTION_EXCLUDED_TOOLS.contains(toolName)
+                || rawResult == null || rawResult.length() <= toolResultEvictionChars) {
+            return rawResult;
+        }
+        int total = rawResult.length();
+        int preview = Math.min(TOOL_RESULT_PREVIEW_CHARS, total / 2);
+
+        String uuid = null;
+        if (offloadStore != null) {
+            String conversationId = params != null ? params.getConversationId() : null;
+            String userId = params != null ? params.getUserId() : null;
+            long sessionId = runtimeCtx != null ? runtimeCtx.getSessionId() : 0L;
+            if (conversationId != null) {
+                Message original = ToolResponseMessage.builder()
+                        .responses(List.of(new ToolResponseMessage.ToolResponse(toolCallId, toolName, rawResult)))
+                        .build();
+                uuid = offloadStore.offload(conversationId, sessionId, userId, original);
+            }
+        }
+
+        String head = rawResult.substring(0, preview);
+        String tail = rawResult.substring(total - preview);
+        String placeholder;
+        if (uuid != null) {
+            placeholder = "[工具结果过大，已卸载] tool=" + toolName + "，原文 " + total + " 字符，已 offload（uuid="
+                    + uuid + "）。如需完整内容，调用 context_reload(uuid=\"" + uuid + "\") 分页取回。\n\n"
+                    + "== 开头 " + preview + " 字符 ==\n" + head
+                    + "\n\n... 中间 " + (total - 2 * preview) + " 字符省略 ...\n\n"
+                    + "== 结尾 " + preview + " 字符 ==\n" + tail;
+        } else {
+            placeholder = "[工具结果过大，已截断] tool=" + toolName + "，原文 " + total + " 字符（offload 不可用，全文未保留）。\n\n"
+                    + "== 开头 " + preview + " 字符 ==\n" + head
+                    + "\n\n... 中间 " + (total - 2 * preview) + " 字符省略 ...\n\n"
+                    + "== 结尾 " + preview + " 字符 ==\n" + tail;
+        }
+
+        log.info("[ToolResultEviction] 工具结果过大已卸载: tool={}, chars={} -> {} (head+tail 各 {}), offloadUuid={}",
+                toolName, total, placeholder.length(), preview, uuid);
+        return placeholder;
+    }
+
+    /**
+     * 写入工具执行 Span（TOOL trace）。在 {@link #executeSingleTool} 唯一汇聚点调用，
+     * 同步/异步路径、工具不存在、执行异常均覆盖；round 取当前运行时轮次（即发起调用的 LLM 轮次）。
+     * trace 未启用（TraceManager 为 null）或非流式路径（runtimeCtx 为 null）时静默跳过。
+     */
+    private void traceToolSpan(AgentRuntimeContext runtimeCtx, AssistantMessage.ToolCall toolCall,
+                               String arguments, String result, boolean success,
+                               long durationMs, String errorMessage) {
+        if (runtimeCtx == null || runtimeCtx.getTraceManager() == null) {
+            return;
+        }
+        runtimeCtx.getTraceManager().traceTool(
+                runtimeCtx.getTotalRounds(), toolCall.name(), toolCall.id(),
+                arguments, result, success, durationMs, errorMessage);
     }
 
     /**
@@ -178,14 +266,17 @@ public class ToolCallExecutor {
             AssistantMessage.ToolCall tc = toolCalls.get(i);
 
             Schedulers.boundedElastic().schedule(() -> {
+                long toolStart = System.currentTimeMillis();
                 try {
                     ToolExecutionResult toolResult = executeSingleTool(tc, params, sink, runtimeCtx);
                     results.set(index, collectToolCallMessages(tc, toolResult));
-                    execDetails.set(index, new ToolExecDetail(tc, toolResult.rawResult(), null));
+                    execDetails.set(index, new ToolExecDetail(tc, toolResult.rawResult(), null,
+                            System.currentTimeMillis() - toolStart));
                 } catch (Exception ex) {
                     log.error("Unexpected error in tool execution: {} - {}", tc.name(), ex.getMessage());
                     results.set(index, collectToolCallErrorMessages(tc, ex));
-                    execDetails.set(index, new ToolExecDetail(tc, null, ex));
+                    execDetails.set(index, new ToolExecDetail(tc, null, ex,
+                            System.currentTimeMillis() - toolStart));
                 } finally {
                     int completed = completedCount.incrementAndGet();
                     if (completed >= total) {
@@ -209,7 +300,7 @@ public class ToolCallExecutor {
                                             detail.toolCall.arguments(),
                                             detail.rawResult,
                                             true,
-                                            0));
+                                            detail.durationMs));
                                 }
                             }
                         }
@@ -486,6 +577,6 @@ public class ToolCallExecutor {
     record ToolExecutionResult(String rawResult) {
     }
 
-    record ToolExecDetail(AssistantMessage.ToolCall toolCall, String rawResult, Exception error) {
+    record ToolExecDetail(AssistantMessage.ToolCall toolCall, String rawResult, Exception error, long durationMs) {
     }
 }

@@ -22,7 +22,8 @@ public class ContextReloadTool {
 
     private static final Logger log = LoggerFactory.getLogger(ContextReloadTool.class);
 
-    private static final int MAX_RETURN_CHARS = 32000;
+    private static final int DEFAULT_PAGE_CHARS = 8000;
+    private static final int MAX_PAGE_CHARS = 16000;
 
     private final SessionMessageStore sessionMessageStore;
 
@@ -32,10 +33,14 @@ public class ContextReloadTool {
 
     @Tool(name = "context_reload", description = """
             取回此前被压缩/offload 的消息原文。当你在上下文中看到形如 [offload:uuid] 或 [内容已 offload, uuid=xxx] 的标记时，
-            如果需要完整内容来回答用户问题，可调用本工具按 uuid 取回。无需取回时不要调用。
+            如果需要完整内容来回答用户问题，可调用本工具按 uuid 分页取回。每次默认返回 8000 字符，
+            返回结果会携带 nextOffset；还有更多内容时，用 offset=nextOffset 继续翻页，直到返回「已到末尾」。
+            无需取回时不要调用。
             """)
     public String contextReload(
-            @ToolParam(description = "offload 引用中的 UUID（仅含 0-9、a-f、A-F 和连字符）") String uuid) {
+            @ToolParam(description = "offload 引用中的 UUID（仅含 0-9、a-f、A-F 和连字符）") String uuid,
+            @ToolParam(description = "起始字符偏移（0 起），默认 0", required = false) Integer offset,
+            @ToolParam(description = "本次最多返回的字符数，默认 8000，上限 16000", required = false) Integer limit) {
         if (sessionMessageStore == null) {
             return "[error] offload store unavailable";
         }
@@ -44,13 +49,22 @@ public class ContextReloadTool {
             if (messages.isEmpty()) {
                 return "[not_found] uuid=" + uuid + " not in offload_context";
             }
-            String text = extract(messages);
-            if (text.length() > MAX_RETURN_CHARS) {
-                text = text.substring(0, MAX_RETURN_CHARS)
-                        + "\n...[truncated, total " + text.length() + " chars]";
+            String fullText = extract(messages);
+            int total = fullText.length();
+            int start = offset == null ? 0 : Math.max(0, offset);
+            int pageSize = limit == null ? DEFAULT_PAGE_CHARS
+                    : Math.min(Math.max(limit, 1), MAX_PAGE_CHARS);
+            if (start >= total) {
+                return "[end] uuid=" + uuid + " 已读完（total=" + total + " chars，offset=" + start + "）";
             }
-            log.info("[ContextReloadTool] reloaded uuid={}, messages={}, chars={}", uuid, messages.size(), text.length());
-            return text;
+            int end = Math.min(start + pageSize, total);
+            String page = fullText.substring(start, end);
+            boolean hasMore = end < total;
+            String header = "[offload " + uuid + "] total=" + total + " chars，本段 [" + start + ", " + end + ")"
+                    + (hasMore ? "，nextOffset=" + end + "（还有更多，可用 offset=" + end + " 继续取）" : "，已到末尾");
+            log.info("[ContextReloadTool] reloaded uuid={}, messages={}, range=[{},{}), total={}",
+                    uuid, messages.size(), start, end, total);
+            return header + "\n\n" + page;
         } catch (Exception e) {
             log.warn("[ContextReloadTool] failed uuid={}: {}", uuid, e.getMessage());
             return "[error] " + e.getMessage();

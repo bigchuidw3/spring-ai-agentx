@@ -71,7 +71,7 @@ public class RagRedisRetrieveTest {
      * 自定义文档类型 metadata，入库时注入，检索时用于过滤。
      */
     private static final String DOC_TYPE = "docType";
-    private static final String DOC_TYPE_VALUE = "aicube";
+    private static final String DOC_TYPE_VALUE = "demo";
 
     public static void main(String[] args) throws Exception {
         System.setOut(new PrintStream(new FileOutputStream(FileDescriptor.out), true, StandardCharsets.UTF_8));

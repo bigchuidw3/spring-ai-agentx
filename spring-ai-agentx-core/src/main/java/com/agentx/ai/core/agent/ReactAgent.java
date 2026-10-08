@@ -227,6 +227,11 @@ public class ReactAgent {
         // Hook 列表：用户 Hook + 按需引入的上下文压缩 Hook（压缩 Hook 优先级最高，置列表首部）
         List<AgentHook> allHooks = new ArrayList<>(hooks != null ? hooks : List.of());
 
+        // offloadStore：会话启用时构建，供上下文压缩 offload + 工具结果源头卸载共用
+        OffloadStore offloadStore = (enableSession && sessionMessageStore != null)
+                ? new SessionBackedOffloadStore(sessionMessageStore)
+                : new NoOpOffloadStore();
+
         var executorBuilder = AgentLoopExecutor.builder()
                 .chatClient(chatClient)
                 .maxRounds(maxRounds)
@@ -243,13 +248,13 @@ public class ReactAgent {
                 .thinkingMode(thinkingMode)
                 .maxRetries(maxRetries)
                 .advisors(advisors)
-                .observationRegistry(observationRegistry);
+                .observationRegistry(observationRegistry)
+                .offloadStore(offloadStore)
+                .toolResultEvictionChars(this.contextPolicy != null
+                        ? this.contextPolicy.toolResultEvictionChars() : 0);
 
         // 上下文压缩（可选，按需引入 ContextCompactionHook）
         if (this.contextPolicy != null) {
-            OffloadStore offloadStore = (enableSession && sessionMessageStore != null)
-                    ? new SessionBackedOffloadStore(sessionMessageStore)
-                    : new NoOpOffloadStore();
             LlmSummarizer summarizer = new LlmSummarizer(this.chatModel);
             List<CompressionStrategy> chain = new ArrayList<>();
             chain.add(new HistoricalToolListStrategy());
@@ -261,7 +266,7 @@ public class ReactAgent {
             ContextCompactor compactor = new ContextCompactor(
                     this.contextPolicy, this.chatModel,
                     offloadStore, sessionMessageStore,
-                    chain);
+                    chain, summarizer);
             // 压缩 Hook 置列表首部（priority=Integer.MAX_VALUE 已确保最先执行）
             allHooks.add(0, new ContextCompactionHook(compactor));
         }

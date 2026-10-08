@@ -94,4 +94,17 @@ public interface SandboxBackend {
      * @param sandbox 运行时沙箱实例
      */
     void destroy(Sandbox sandbox);
+
+    /**
+     * 按容器名销毁容器（不管运行状态）。
+     *
+     * <p>默认实现：findExisting + destroy（仅能销毁运行中的容器）；
+     * 容器型后端（如 Docker）应覆盖为直接 stop + remove，以处理已停止（exited）的残留容器。
+     */
+    default void destroyByName(String containerName) {
+        Sandbox existing = findExisting(containerName);
+        if (existing != null) {
+            destroy(existing);
+        }
+    }
 }

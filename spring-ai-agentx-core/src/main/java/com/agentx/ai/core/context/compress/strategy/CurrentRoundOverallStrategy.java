@@ -60,9 +60,10 @@ public class CurrentRoundOverallStrategy implements CompressionStrategy {
             log.info("[L6] LLM summary empty, skipping");
             return false;
         }
+        ctx.accumulateSummaryTokens(summarizer.getLastPromptTokens(), summarizer.getLastCompletionTokens());
 
         String uuid = ctx.hasOffloadStore()
-                ? ctx.offloadStore().offload(ctx.conversationId(), ctx.sessionId(), currentRound)
+                ? ctx.offloadStore().offload(ctx.conversationId(), ctx.sessionId(), ctx.userId(), currentRound)
                 : null;
         String summaryMessage = "[当前任务压缩摘要]\n" + summary + buildOffloadHint(uuid);
         for (int i = messages.size() - 1; i >= start; i--) {

@@ -1,22 +1,23 @@
-package com.agentx.ai.core.sandbox.docker;
+package com.agentx.ai.core.sandbox;
 
 /**
- * 容器命名工具。
+ * 沙箱命名工具。
  *
- * <p>把 scope key（conversationId / userId）清洗为合法的 Docker 容器名。
- * Docker 容器名只能包含 {@code [a-zA-Z0-9_.-]}，且不能以 {@code . _ -} 开头。
+ * <p>把 scope key（conversationId / userId）清洗为合法的沙箱名称，
+ * 供各后端作为容器名 / 标识使用。名称只能包含 {@code [a-zA-Z0-9_.-]}，
+ * 且不能以 {@code . _ -} 开头。
  *
  * @author bigchui
  */
 public final class ContainerNameUtil {
 
     /**
-     * AgentX 沙箱容器统一前缀
+     * AgentX 沙箱名称统一前缀
      */
     public static final String PREFIX = "agentx-sandbox-";
 
     /**
-     * scope key 最大长度（容器名限制 200 字符，减去前缀 16 字符和余量）
+     * scope key 最大长度（名称限制 200 字符，减去前缀 16 字符和余量）
      */
     private static final int MAX_SCOPE_LENGTH = 180;
 
@@ -24,10 +25,10 @@ public final class ContainerNameUtil {
     }
 
     /**
-     * 计算 scope key 对应的容器名。
+     * 计算 scope key 对应的沙箱名称。
      *
      * @param scopeKey 会话级或用户级标识（conversationId / userId）
-     * @return 容器名，如 {@code agentx-sandbox-conv_001}
+     * @return 沙箱名称，如 {@code agentx-sandbox-conv_001}
      */
     public static String toContainerName(String scopeKey) {
         if (scopeKey == null || scopeKey.isBlank()) {

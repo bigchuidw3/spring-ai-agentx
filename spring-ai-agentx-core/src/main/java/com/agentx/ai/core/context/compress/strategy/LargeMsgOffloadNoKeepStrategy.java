@@ -4,8 +4,9 @@ import com.agentx.ai.core.context.compress.CompressionContext;
 
 /**
  * L3 大消息 offload（不保护 lastKeep）。
- * 仅保护最新 AssistantMessage，扫描整个历史轮次区域。
- * 仅在 L2 未触发时执行（外层策略链顺序保证）。
+ * 扫描上界放宽到「最后一个含 tool_calls 的 AssistantMessage 之前」：
+ * 既能 offload 历史区的大消息，也能 offload 当前轮里已经「看过」的超长工具结果，
+ * 只保护 LLM 下一轮正在等待的最新工具结果。仅在 L2 未触发时执行（外层策略链顺序保证）。
  *
  * @author bigchui
  */
@@ -13,11 +14,7 @@ public class LargeMsgOffloadNoKeepStrategy extends AbstractLargeMsgOffloadStrate
 
     @Override
     protected int scanEnd(CompressionContext ctx) {
-        int latestUser = ctx.latestUserMsgIndex();
-        if (latestUser < 0) {
-            return ctx.messages().size();
-        }
-        return latestUser;
+        return ctx.latestToolCallBoundary();
     }
 
     @Override
