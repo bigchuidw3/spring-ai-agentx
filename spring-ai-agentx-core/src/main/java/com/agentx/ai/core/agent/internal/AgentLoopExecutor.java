@@ -906,6 +906,12 @@ public class AgentLoopExecutor {
                 state.promptTokens, state.completionTokens, durationMs);
 
         toolCallExecutor.executeToolCallsAsync(sink, safeToolCalls, messages, params, execCtx, () -> {
+            // 工具执行阶段被中断时，任务已被移除，不再调度下一轮模型调用
+            if (taskManager != null && conversationId != null
+                    && !taskManager.hasRunningTask(conversationId)) {
+                log.debug("Task interrupted during tool execution, skip next round: conversationId={}", conversationId);
+                return;
+            }
             scheduleRound(messages, sink, roundCounter, params, execCtx, query);
         });
     }
