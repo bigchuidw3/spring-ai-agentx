@@ -5,6 +5,7 @@ import org.slf4j.LoggerFactory;
 import reactor.core.Disposable;
 import reactor.core.publisher.Sinks;
 
+import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
@@ -185,10 +186,22 @@ public class AgentTaskManager {
             // 无回调（极少见，如首轮 scheduleRound 之前）— 直接 complete sink
             Sinks.Many<?> sink = taskInfo.getSink();
             if (sink != null) {
-                sink.tryEmitComplete();
+                completeQuietly(sink);
             }
         }
         return true;
+    }
+
+    /**
+     * 完成 sink：并发发射冲突（FAIL_NON_SERIALIZED）时短暂自旋重试，防止 complete 被
+     * 静默丢弃导致流永不终止；其余失败视为已终止，忽略即可。
+     */
+    private static void completeQuietly(Sinks.Many<?> sink) {
+        try {
+            sink.emitComplete(Sinks.EmitFailureHandler.busyLooping(Duration.ofMillis(500)));
+        } catch (Sinks.EmissionException e) {
+            log.debug("Sink already terminated when completing: {}", e.getMessage());
+        }
     }
 
     /**

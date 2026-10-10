@@ -13,6 +13,7 @@ import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import reactor.core.publisher.Sinks;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -178,13 +179,25 @@ public class InterruptContext {
 
     /**
      * 发射 Paused 事件并完成 sink。被 {@link AgentTaskManager#interrupt} 注册的回调调用。
+     *
+     * <p>中断回调运行在调用方线程（如 HTTP 请求线程），可能与流式输出线程并发向 sink 发射。
+     * 并发发射时 tryEmit 会返回 FAIL_NON_SERIALIZED 并静默丢弃信号——complete 被丢意味着
+     * 流永不终止。因此改用带失败处理器的 emit 方法：对并发冲突短暂自旋重试（对端发射是
+     * 微秒级，很快让出；busyLooping 的时限在构造时固定，须每次调用新建），其余失败
+     * （如已终止）放弃并记日志。
      */
     public void emitPausedAndComplete(PauseState state) {
+        Sinks.EmitFailureHandler retryOnConcurrentEmit =
+                Sinks.EmitFailureHandler.busyLooping(Duration.ofMillis(500));
         try {
-            sink.tryEmitNext(new AgentStreamEvent.Paused(state));
-        } catch (Exception e) {
+            sink.emitNext(new AgentStreamEvent.Paused(state), retryOnConcurrentEmit);
+        } catch (Sinks.EmissionException e) {
             log.warn("[InterruptContext] Failed to emit Paused: {}", e.getMessage());
         }
-        sink.tryEmitComplete();
+        try {
+            sink.emitComplete(retryOnConcurrentEmit);
+        } catch (Sinks.EmissionException e) {
+            log.warn("[InterruptContext] Failed to complete sink: {}", e.getMessage());
+        }
     }
 }
