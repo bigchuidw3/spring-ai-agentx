@@ -399,7 +399,8 @@ public class BashTool {
                 long timeout = bashTool.defaultTimeoutMs;
                 Object timeoutObj = input.get("timeoutMs");
                 if (timeoutObj instanceof Number n) {
-                    timeout = n.longValue();
+                    // 与非沙箱路径一致：单次超时钳制在 [1s, MAX_TIMEOUT_MS]，防止长命令挂死会话
+                    timeout = Math.max(1000, Math.min(n.longValue(), MAX_TIMEOUT_MS));
                 }
                 ShellSessionManager.CommandResult result = eb.executeCommand(command, timeout);
                 return bashTool.formatResult(result);

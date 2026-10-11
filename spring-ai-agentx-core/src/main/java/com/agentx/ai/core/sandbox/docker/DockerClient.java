@@ -153,6 +153,7 @@ public class DockerClient {
      * path 作为 tee 的参数传递，不走 shell，无注入风险。
      */
     public void writeFile(String name, String path, byte[] content) {
+        mkdirParentDirs(name, path);
         int exitCode = ProcessRunner.runWithStream(
                 List.of("docker", "exec", "-i", name, "tee", path),
                 new ByteArrayInputStream(content), null, defaultTimeoutMs);
@@ -249,6 +250,7 @@ public class DockerClient {
      * 将宿主机目录或文件拷贝到容器。
      */
     public void copyToContainer(String name, Path hostSource, String containerPath) {
+        mkdirParentDirs(name, containerPath);
         ProcessRunner.ProcessResult r = ProcessRunner.run(
                 List.of("docker", "cp", hostSource.toString(), name + ":" + containerPath),
                 defaultTimeoutMs);
@@ -256,6 +258,22 @@ public class DockerClient {
             throw new SandboxException(AgentErrorCode.SANDBOX_CONTAINER_NOT_FOUND,
                     "拷贝到容器失败 [" + name + ":" + containerPath + "]: " + r.stderr());
         }
+    }
+
+    /**
+     * 确保容器内目标路径的父目录存在（mkdir -p）。
+     *
+     * <p>docker cp 与 tee 都不会自动创建父目录，写文件 / 拷贝到嵌套新路径前必须先建好，
+     * 否则会因目标目录不存在而失败。path 作为参数传递，不走 shell，无注入风险。
+     */
+    private void mkdirParentDirs(String name, String path) {
+        int slash = path.lastIndexOf('/');
+        if (slash <= 0) {
+            return;
+        }
+        ProcessRunner.run(
+                List.of("docker", "exec", name, "mkdir", "-p", path.substring(0, slash)),
+                defaultTimeoutMs);
     }
 
     // ==================== 镜像 ====================

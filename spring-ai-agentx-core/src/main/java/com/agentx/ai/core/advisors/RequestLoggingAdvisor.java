@@ -169,11 +169,29 @@ public class RequestLoggingAdvisor implements CallAdvisor, StreamAdvisor {
                 }
                 map.put("tool_calls", tcList);
             }
+            // 与 MessageJsonSerializer 对齐：reasoning_content 缺字段会被 DeepSeek 网关 400 拒绝，
+            // 实际请求（DeepSeekV4ChatModel）对无思考的 assistant 补空字符串，trace 这里同样补空，
+            // 保证 trace 入参与实际发送一致
+            String reasoning = extractReasoningContent(assistantMessage);
+            map.put("reasoning_content", reasoning != null ? reasoning : "");
         } else {
             map.put("content", message.getText());
         }
 
         return List.of(map);
+    }
+
+    /** 从 AssistantMessage metadata 提取思考内容（兼容 reasoningContent / reasoning_content 两个键）。 */
+    private static String extractReasoningContent(AssistantMessage message) {
+        Map<String, Object> metadata = message.getMetadata();
+        if (metadata == null || metadata.isEmpty()) {
+            return null;
+        }
+        Object rc = metadata.get("reasoningContent");
+        if (rc == null) {
+            rc = metadata.get("reasoning_content");
+        }
+        return rc instanceof String s && !s.isEmpty() ? s : null;
     }
 
     // ======================== Options ========================

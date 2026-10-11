@@ -11,14 +11,15 @@ import org.springframework.ai.chat.messages.UserMessage;
 import java.util.List;
 
 /**
- * Token 估算工具。
+ * Token 估算工具（无外部 tokenizer 依赖的轻量近似）。
  * <p>
- * 区分中英文进行差异化估算：
+ * 实际 token 数只能在调用返回后从 usage 拿到，而压缩在调用前触发，只能估算。
+ * 为「宁可早点压缩、不要等超了再压缩」，估算故意偏保守（偏高）：
  * <ul>
- *   <li>英文/ASCII 字符：约 4 字符 = 1 token</li>
- *   <li>中文/CJK 字符：约 1.5 字符 = 1 token</li>
+ *   <li>英文/ASCII：约 3 字符 = 1 token（实际约 4）</li>
+ *   <li>中文/CJK：约 1 字符 = 1 token（实际约 1~1.5 字符 = 1 token）</li>
  * </ul>
- * 不依赖外部 token 计数库，保持框架轻量。
+ * 即估算值通常 ≥ 实际值，保证压缩触发时真实上下文尚未超窗口。
  *
  * @author bigchui
  *
@@ -28,13 +29,13 @@ public final class TokenEstimator {
     private static final Logger log = LoggerFactory.getLogger(TokenEstimator.class);
 
     /**
-     * 英文估算比率：约 4 字符 = 1 token
+     * 英文估算比率：约 3 字符 = 1 token（宁高估勿低估）
      */
-    private static final double CHARS_PER_TOKEN_EN = 4.0;
+    private static final double CHARS_PER_TOKEN_EN = 3.0;
     /**
-     * 中文估算比率：约 1.5 字符 = 1 token
+     * 中文估算比率：约 1 字符 = 1 token（宁高估勿低估）
      */
-    private static final double CHARS_PER_TOKEN_CJK = 1.5;
+    private static final double CHARS_PER_TOKEN_CJK = 1.0;
 
     private TokenEstimator() {
     }

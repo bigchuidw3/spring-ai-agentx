@@ -22,21 +22,24 @@ public class CompactionTracer {
      *
      * @param summaryPromptTokens     摘要调用的累计输入 token（>0 表示发生过摘要调用）
      * @param summaryCompletionTokens 摘要调用的累计输出 token
+     * @param durationMs              压缩总耗时（毫秒）
      */
     public void record(TraceManager traceManager, int round, String strategy,
                        int beforeTokens, int afterTokens, int beforeMessages, int afterMessages,
-                       long summaryPromptTokens, long summaryCompletionTokens, LlmSummarizer summarizer) {
+                       long summaryPromptTokens, long summaryCompletionTokens, LlmSummarizer summarizer,
+                       long durationMs) {
         if (traceManager == null) {
             return;
         }
         long compactId = traceManager.traceCompaction(round, strategy,
-                buildCompactionJson(strategy, beforeTokens, afterTokens, beforeMessages, afterMessages), 0);
+                buildCompactionJson(strategy, beforeTokens, afterTokens, beforeMessages, afterMessages), durationMs);
         if (summaryPromptTokens > 0 && summarizer != null) {
             traceManager.trace(round,
                     buildSummaryInputJson(summarizer.getLastSystemPrompt(), summarizer.getLastUserPrompt()),
                     summarizer.getLastSummary(),
                     null,
-                    (int) summaryPromptTokens, (int) summaryCompletionTokens, 0, compactId);
+                    (int) summaryPromptTokens, (int) summaryCompletionTokens,
+                    summarizer.getLastDurationMs(), compactId);
         }
     }
 

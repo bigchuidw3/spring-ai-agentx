@@ -195,9 +195,11 @@ public class DockerExecutionBackend implements ExecutionBackend {
      * 判断是否为「命令不存在」。
      */
     private boolean isCommandNotFound(ProcessRunner.ProcessResult r) {
-        return r.exitCode() == 127
-                || (r.exitCode() != 0 && r.stderr().contains("not found")
-                && r.stderr().contains("rg"));
+        // rg 不存在时 docker exec 返回 126（无法执行）或 127（未找到）；
+        // 部分环境 stderr 为空或格式不一，仅凭 stderr 判断不可靠，exitCode 落在 126/127 即视为命令不存在
+        return r.exitCode() == 126 || r.exitCode() == 127
+                || (r.exitCode() != 0 && r.stderr() != null
+                && r.stderr().contains("not found") && r.stderr().contains("rg"));
     }
 
     /**

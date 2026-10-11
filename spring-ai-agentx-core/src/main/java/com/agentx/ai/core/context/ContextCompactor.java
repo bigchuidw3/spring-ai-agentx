@@ -68,17 +68,20 @@ public class ContextCompactor {
                 messages, query, conversationId, sessionId, userId,
                 policy, chatModel, offloadStore);
 
+        long startTime = System.currentTimeMillis();
         for (CompressionStrategy strategy : strategies) {
             try {
                 if (strategy.tryCompress(ctx)) {
                     int afterTokens = TokenEstimator.estimateTokens(messages);
                     int afterMessages = messages.size();
+                    long durationMs = System.currentTimeMillis() - startTime;
                     log.info("[ContextCompactor] {} triggered compression: messages={} -> {}, tokens={} -> {}",
                             strategy.name(), beforeMessages, afterMessages, beforeTokens, afterTokens);
                     persistWorkingMessages(conversationId, sessionId, userId, messages);
                     tracer.record(traceManager, round, strategy.name(),
                             beforeTokens, afterTokens, beforeMessages, afterMessages,
-                            ctx.getSummaryPromptTokens(), ctx.getSummaryCompletionTokens(), summarizer);
+                            ctx.getSummaryPromptTokens(), ctx.getSummaryCompletionTokens(), summarizer,
+                            durationMs);
                     return;
                 }
             } catch (Exception e) {

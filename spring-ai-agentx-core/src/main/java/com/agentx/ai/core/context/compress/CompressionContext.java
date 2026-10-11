@@ -122,6 +122,22 @@ public class CompressionContext {
         return messages.size();
     }
 
+    /**
+     * 最近一条「最终回复」（无 tool_calls 的 AssistantMessage）的索引，
+     * 作为历史压缩层的保护下界（exclusive）：它及其之后的消息（最近一轮已完成的回复 +
+     * 当前进行中的轮次）不被历史压缩层触碰。不存在时返回 -1。
+     */
+    public int latestFinalAssistantIndex() {
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            Message m = messages.get(i);
+            if (m instanceof AssistantMessage am
+                    && (am.getToolCalls() == null || am.getToolCalls().isEmpty())) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     public void accumulateSummaryTokens(long promptTokens, long completionTokens) {
         this.summaryPromptTokens += promptTokens;
         this.summaryCompletionTokens += completionTokens;

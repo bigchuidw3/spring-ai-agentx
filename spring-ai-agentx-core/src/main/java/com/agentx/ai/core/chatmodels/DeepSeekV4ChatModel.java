@@ -48,14 +48,30 @@ import org.springframework.ai.model.tool.internal.ToolCallReactiveContextHolder;
 import org.springframework.ai.retry.RetryUtils;
 import org.springframework.ai.support.UsageCalculator;
 import org.springframework.ai.tool.definition.ToolDefinition;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferFactory;
+import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.core.io.buffer.DefaultDataBufferFactory;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.client.reactive.ClientHttpRequest;
 import org.springframework.retry.support.RetryTemplate;
 import org.springframework.util.Assert;
 import org.springframework.util.CollectionUtils;
+import org.springframework.web.reactive.function.client.ClientRequest;
+import org.springframework.web.reactive.function.client.ExchangeFilterFunction;
+import org.springframework.web.client.RestClient;
+import org.springframework.web.reactive.function.client.WebClient;
+import org.reactivestreams.Publisher;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
+import java.net.URI;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -66,7 +82,7 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * @author Geng Rong
  */
-public class DeepSeekV4ChatModel implements ChatModel {
+public class DeepSeekV4ChatModel implements ChatModel, StreamingChatModel {
 
 	private static final Logger logger = LoggerFactory.getLogger(DeepSeekV4ChatModel.class);
 
@@ -489,6 +505,11 @@ public class DeepSeekV4ChatModel implements ChatModel {
 						reasoningContent = rc;
 					}
 				}
+				// DeepSeek 要求 assistant 消息携带 reasoning_content 字段（空字符串即可），缺失则 400；
+				// 模型偶发不吐思考，以及压缩生成的合成 assistant（无思考链）都会缺该字段，统一补空
+				if (reasoningContent == null || reasoningContent.isEmpty()) {
+					reasoningContent = "";
+				}
 
 				return List.of(new ChatCompletionMessage(text, ChatCompletionMessage.Role.ASSISTANT, null, null,
 						toolCalls, isPrefixAssistantMessage, reasoningContent));
@@ -568,9 +589,144 @@ public class DeepSeekV4ChatModel implements ChatModel {
 		return new Builder();
 	}
 
+	/**
+	 * 流式请求注入 stream_options.include_usage 的 WebClient 过滤器。
+	 *
+	 * <p>OpenAI 兼容网关（如 litellm）通常只在请求带 stream_options 时才在流式响应
+	 * 的末帧携带 usage，而请求对象没有该字段，故在发送前于 WebClient 层补上。
+	 * 非流式请求不受影响。
+	 */
+	static ExchangeFilterFunction streamUsageFilter() {
+		return (request, next) -> {
+			String path = request.url() == null ? "" : String.valueOf(request.url().getPath());
+			if (request.method() != HttpMethod.POST || !path.contains("completions")) {
+				return next.exchange(request);
+			}
+			ClientRequest patched = ClientRequest.from(request)
+					.body((outputMessage, context) -> request.body()
+							.insert(new StreamOptionsPatchingRequest(outputMessage), context))
+					.build();
+			return next.exchange(patched);
+		};
+	}
+
+	/**
+	 * 装饰请求写出：缓冲完整请求体后，stream=true 且无 stream_options 时注入再交给真实请求。
+	 */
+	private static final class StreamOptionsPatchingRequest implements ClientHttpRequest {
+
+		private static final ObjectMapper JSON = new ObjectMapper();
+
+		private final ClientHttpRequest delegate;
+
+		private StreamOptionsPatchingRequest(ClientHttpRequest delegate) {
+			this.delegate = delegate;
+		}
+
+		@Override
+		public Mono<Void> writeWith(Publisher<? extends DataBuffer> body) {
+			return DataBufferUtils.join(body)
+					.map(buffer -> {
+						try {
+							byte[] bytes = new byte[buffer.readableByteCount()];
+							buffer.read(bytes);
+							return patchStreamOptions(bytes);
+						}
+						finally {
+							DataBufferUtils.release(buffer);
+						}
+					})
+					.defaultIfEmpty(new byte[0])
+					.flatMap(patched -> delegate.writeWith(
+							Mono.just(DefaultDataBufferFactory.sharedInstance.wrap(patched))));
+		}
+
+		@Override
+		public Mono<Void> writeAndFlushWith(Publisher<? extends Publisher<? extends DataBuffer>> body) {
+			return writeWith(Flux.from(body).flatMapSequential(Flux::from));
+		}
+
+		@Override
+		public Mono<Void> setComplete() {
+			return delegate.setComplete();
+		}
+
+		/** stream=true 且缺 stream_options 时注入 include_usage，其余原样返回。 */
+		private static byte[] patchStreamOptions(byte[] original) {
+			try {
+				JsonNode root = JSON.readTree(original);
+				if (root instanceof ObjectNode obj && obj.path("stream").asBoolean(false)
+						&& !obj.has("stream_options")) {
+					obj.putObject("stream_options").put("include_usage", true);
+					return JSON.writeValueAsBytes(obj);
+				}
+			}
+			catch (Exception e) {
+				logger.warn("注入 stream_options 失败，按原请求体发送: {}", e.getMessage());
+			}
+			return original;
+		}
+
+		@Override
+		public HttpHeaders getHeaders() {
+			return delegate.getHeaders();
+		}
+
+		@Override
+		public HttpMethod getMethod() {
+			return delegate.getMethod();
+		}
+
+		@Override
+		public URI getURI() {
+			return delegate.getURI();
+		}
+
+		@SuppressWarnings("unchecked")
+		@Override
+		public <T> T getNativeRequest() {
+			return (T) delegate.getNativeRequest();
+		}
+
+		@Override
+		public org.springframework.util.MultiValueMap<String, org.springframework.http.HttpCookie> getCookies() {
+			return delegate.getCookies();
+		}
+
+		@Override
+		public Map<String, Object> getAttributes() {
+			return delegate.getAttributes();
+		}
+
+		@Override
+		public boolean isCommitted() {
+			return delegate.isCommitted();
+		}
+
+		@Override
+		public void beforeCommit(java.util.function.Supplier<? extends Mono<Void>> action) {
+			delegate.beforeCommit(action);
+		}
+
+		@Override
+		public DataBufferFactory bufferFactory() {
+			return delegate.bufferFactory();
+		}
+	}
+
 	public static final class Builder {
 
 		private DeepSeekApi deepSeekApi;
+
+		/** 端点地址与密钥：不直接提供 DeepSeekApi 时由框架构建（自动应用 DeepSeek 网关适配）。 */
+		private String baseUrl;
+
+		private String apiKey;
+
+		/** 可选：自定义 RestClient/WebClient（超时、TLS 等传输配置由调用方决定，缺省用默认值）。 */
+		private RestClient.Builder restClientBuilder;
+
+		private WebClient.Builder webClientBuilder;
 
 		private DeepSeekChatOptions defaultOptions = DeepSeekChatOptions.builder()
 			.model(DeepSeekApi.DEFAULT_CHAT_MODEL)
@@ -590,6 +746,26 @@ public class DeepSeekV4ChatModel implements ChatModel {
 
 		public Builder deepSeekApi(DeepSeekApi deepSeekApi) {
 			this.deepSeekApi = deepSeekApi;
+			return this;
+		}
+
+		public Builder baseUrl(String baseUrl) {
+			this.baseUrl = baseUrl;
+			return this;
+		}
+
+		public Builder apiKey(String apiKey) {
+			this.apiKey = apiKey;
+			return this;
+		}
+
+		public Builder restClientBuilder(RestClient.Builder restClientBuilder) {
+			this.restClientBuilder = restClientBuilder;
+			return this;
+		}
+
+		public Builder webClientBuilder(WebClient.Builder webClientBuilder) {
+			this.webClientBuilder = webClientBuilder;
 			return this;
 		}
 
@@ -620,6 +796,19 @@ public class DeepSeekV4ChatModel implements ChatModel {
 		}
 
 		public DeepSeekV4ChatModel build() {
+			if (this.deepSeekApi == null) {
+				Assert.hasText(this.baseUrl, "baseUrl is required when deepSeekApi is not provided");
+				WebClient.Builder wcb = (this.webClientBuilder != null ? this.webClientBuilder : WebClient.builder())
+					.filter(streamUsageFilter());
+				DeepSeekApi.Builder apiBuilder = DeepSeekApi.builder()
+					.apiKey(this.apiKey)
+					.baseUrl(this.baseUrl)
+					.webClientBuilder(wcb);
+				if (this.restClientBuilder != null) {
+					apiBuilder.restClientBuilder(this.restClientBuilder);
+				}
+				this.deepSeekApi = apiBuilder.build();
+			}
 			if (this.toolCallingManager != null) {
 				return new DeepSeekV4ChatModel(this.deepSeekApi, this.defaultOptions, this.toolCallingManager,
 						this.retryTemplate, this.observationRegistry, this.toolExecutionEligibilityPredicate);

@@ -1,6 +1,5 @@
 package com.agentx.ai.core.context.compress.strategy;
 
-import com.agentx.ai.core.context.TokenEstimator;
 import com.agentx.ai.core.context.compress.CompressionContext;
 import com.agentx.ai.core.context.compress.CompressionStrategy;
 import com.agentx.ai.core.context.compress.LlmSummarizer;
@@ -19,6 +18,9 @@ import java.util.List;
  * L4 历史轮次 LLM 摘要。
  * 在 L1-L3 都未触发时，按 user→assistant 轮次分段压缩历史消息，保留每条 user 原话。
  *
+ * <p>扫描上界是最近一条「最终回复」（无 tool_calls 的 assistant），它及其之后的消息不动；
+ * 只要轮内有工具调用（user 与最终回复之间 ≥1 条消息）即压缩，不设 token 门槛。
+ *
  * @author bigchui
  */
 public class HistoricalRoundSummaryStrategy implements CompressionStrategy {
@@ -33,7 +35,7 @@ public class HistoricalRoundSummaryStrategy implements CompressionStrategy {
 
     @Override
     public boolean tryCompress(CompressionContext ctx) {
-        int scanEnd = ctx.historicalScanEnd(ctx.policy().lastKeep());
+        int scanEnd = ctx.latestFinalAssistantIndex();
         if (scanEnd <= 0) {
             return false;
         }
@@ -63,10 +65,6 @@ public class HistoricalRoundSummaryStrategy implements CompressionStrategy {
             List<Message> segment = new ArrayList<>();
             segment.add(messages.get(userIdx));
             segment.addAll(messages.subList(start, endExclusive));
-            int totalTokens = TokenEstimator.estimateTokens(segment);
-            if (totalTokens < ctx.policy().minCompressionTokens()) {
-                continue;
-            }
 
             String conversationText = LlmSummarizer.buildConversationText(segment);
             String summary = summarizer.summarize(
