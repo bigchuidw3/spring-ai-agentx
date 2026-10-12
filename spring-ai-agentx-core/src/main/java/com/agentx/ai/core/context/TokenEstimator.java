@@ -36,6 +36,15 @@ public final class TokenEstimator {
      * 中文估算比率：约 1 字符 = 1 token（宁高估勿低估）
      */
     private static final double CHARS_PER_TOKEN_CJK = 1.0;
+    /**
+     * 全局安全系数：补偿 tools 工具定义 schema、chat template special tokens 等
+     * 未计入消息文本的 token 开销，确保估算值 ≥ 实际值（宁可提前压缩，不让上下文超窗）。
+     */
+    private static final double SAFETY_FACTOR = 1.2;
+    /**
+     * 每条消息的固定开销（role 标记、换行等 special tokens 近似）。
+     */
+    private static final int PER_MESSAGE_OVERHEAD = 4;
 
     private TokenEstimator() {
     }
@@ -55,6 +64,8 @@ public final class TokenEstimator {
             nonCjkCount += counts[1];
         }
         int tokens = tokensFromCounts(cjkCount, nonCjkCount);
+        // 每条消息的 special tokens 固定开销（role 标记等），未计入文本估算
+        tokens += messages.size() * PER_MESSAGE_OVERHEAD;
         log.debug("Token estimation: cjkChars={}, nonCjkChars={}, estimatedTokens={}, messages={}",
                 cjkCount, nonCjkCount, tokens, messages.size());
         return tokens;
@@ -83,7 +94,8 @@ public final class TokenEstimator {
     }
 
     private static int tokensFromCounts(int cjkCount, int nonCjkCount) {
-        return (int) (cjkCount / CHARS_PER_TOKEN_CJK + nonCjkCount / CHARS_PER_TOKEN_EN);
+        // 向上取整 + 全局安全系数，避免截断导致低估
+        return (int) Math.ceil((cjkCount / CHARS_PER_TOKEN_CJK + nonCjkCount / CHARS_PER_TOKEN_EN) * SAFETY_FACTOR);
     }
 
     /**

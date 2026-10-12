@@ -1,5 +1,6 @@
 package com.agentx.ai.core.agent.internal;
 
+import com.agentx.ai.core.context.TokenEstimator;
 import com.agentx.ai.core.interrupt.PauseReason;
 import com.agentx.ai.core.interrupt.PauseStateStore;
 import com.agentx.ai.core.memory.store.ConversationStore;
@@ -125,6 +126,24 @@ public class SessionPersister {
         if (tm == null) return;
         tm.trace(round, requestJson, outputData, think,
                 (int) promptTokens, (int) completionTokens, durationMs);
+    }
+
+    /**
+     * 记录一次被中断的 LLM 调用 trace（用户主动中断流式输出时）。
+     *
+     * <p>流式被中断时 usage 尚未返回（OpenAI/DeepSeek 流式的 usage 在最后一帧），
+     * token 无法精确取得，改用 {@link TokenEstimator} 估算：prompt 按完整 messages 估算、
+     * completion 按已产出的部分正文 + 部分思考估算。估算值故意偏高，保证 conversation
+     * 的 token 累计与成本量级正确，同时让 agentx_trace 保留本轮记录（轨迹页签可见）。
+     */
+    public void recordTraceInterrupted(AgentRuntimeContext execCtx, int round,
+                                       String requestJson, String partialText, String partialReasoning,
+                                       List<Message> messages, long durationMs) {
+        int promptTokens = TokenEstimator.estimateTokens(messages);
+        int completionTokens = TokenEstimator.estimateTokens(partialText)
+                + TokenEstimator.estimateTokens(partialReasoning);
+        recordTrace(execCtx, round, requestJson, partialText, partialReasoning,
+                promptTokens, completionTokens, durationMs);
     }
 
     /**

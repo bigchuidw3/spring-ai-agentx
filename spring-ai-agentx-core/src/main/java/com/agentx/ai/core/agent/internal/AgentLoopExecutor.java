@@ -637,6 +637,15 @@ public class AgentLoopExecutor {
         this.interruptContext = new InterruptContext(messages, sink, params, query);
         if (taskManager != null && conversationId != null) {
             taskManager.setInterruptHandler(conversationId, msg -> {
+                // 中断也补落一条 LLM trace：流式被中断拿不到 usage，token 走估算，
+                // 避免 conversation 的 token/成本归零、agentx_trace 缺失本轮记录。
+                // 必须在 flushPartialOutput 之前落，此时 messages 仍是纯输入，prompt 估算不含本轮已产出内容。
+                sessionPersister.recordTraceInterrupted(execCtx, (int) roundCounter.get(),
+                        llmInvoker.getLastRequestJson(),
+                        interruptContext.getPartialText(),
+                        interruptContext.getPartialReasoning(),
+                        messages,
+                        System.currentTimeMillis() - interruptContext.getRoundStartTime());
                 // 中断前把本轮部分回复刷进 messages，纯文本（无工具调用）回复也能落库
                 interruptContext.flushPartialOutput(execCtx);
                 PauseState snapshot = interruptContext.buildSnapshot(msg, execCtx, roundCounter.get());
@@ -678,6 +687,9 @@ public class AgentLoopExecutor {
             interruptContext.setRoundBuffers(roundState.textBuffer, roundState.reasoningBuffer);
         }
         long startTime = System.currentTimeMillis();
+        if (interruptContext != null) {
+            interruptContext.setRoundStartTime(startTime);
+        }
 
         if (!hookManager.isEmpty()) {
             hookManager.fireEvent(new BeforeReasoningEvent(execCtx, round));

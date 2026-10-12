@@ -68,6 +68,10 @@ public class InterruptContext {
      * 当前轮推理缓冲区引用（中断时取部分思考并持久化到 agentx_session）
      */
     private volatile StringBuilder reasoningBuffer;
+    /**
+     * 当前轮 LLM 请求发出时刻（毫秒），中断时据此计算本轮已耗时。
+     */
+    private volatile long roundStartTime;
 
     public InterruptContext(List<Message> messagesRef,
                             Sinks.Many<AgentStreamEvent> sink,
@@ -114,6 +118,17 @@ public class InterruptContext {
 
     public String getPartialReasoning() {
         return reasoningBuffer != null ? reasoningBuffer.toString() : "";
+    }
+
+    /**
+     * 记录当前轮 LLM 请求发出时刻（每轮开始时由 scheduleRound 调用）。
+     */
+    public void setRoundStartTime(long roundStartTime) {
+        this.roundStartTime = roundStartTime;
+    }
+
+    public long getRoundStartTime() {
+        return roundStartTime;
     }
 
     /**
