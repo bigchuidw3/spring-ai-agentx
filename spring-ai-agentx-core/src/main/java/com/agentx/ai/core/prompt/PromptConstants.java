@@ -300,6 +300,30 @@ public final class PromptConstants {
     }
 
     /**
+     * 中断/暂停落库时未完成工具调用的占位响应。
+     * <p>
+     * 中断或 HITL 暂停落库前为链尾未响应的 toolCall 补此占位，
+     * 保证消息链满足每个 tool_call 必跟 tool 响应的协议。
+     */
+    public static final String INTERRUPT_TOOL_PLACEHOLDER_PROMPT = """
+            工具调用被用户中断，未产生执行结果。
+            原工具调用：%s(%s)
+            """;
+
+    /**
+     * 构建中断落库时未完成工具调用的占位响应。
+     *
+     * @param toolName  工具名称
+     * @param arguments 工具参数 JSON
+     * @return 格式化后的占位响应文本
+     */
+    public static String buildInterruptPlaceholderMessage(String toolName, String arguments) {
+        return INTERRUPT_TOOL_PLACEHOLDER_PROMPT.formatted(
+                toolName != null ? toolName : "unknown",
+                arguments != null ? arguments : "");
+    }
+
+    /**
      * 工具发现引导提示词（ToolSearch 模式时注入 system prompt）。
      */
     public static final String TOOL_SEARCH_GUIDANCE = """

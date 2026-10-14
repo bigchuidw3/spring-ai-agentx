@@ -7,6 +7,7 @@ import com.agentx.ai.core.hook.BeforeToolExecutionEvent;
 import com.agentx.ai.core.model.AgentStreamEvent;
 import com.agentx.ai.core.model.PendingToolCall;
 import com.agentx.ai.core.model.RunnableParams;
+import com.agentx.ai.core.prompt.PromptConstants;
 import com.agentx.ai.core.stage.AgentRuntimeContext;
 import com.alibaba.fastjson2.JSON;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -370,6 +371,45 @@ public class ToolCallExecutor {
         messages.add(ToolResponseMessage.builder()
                 .responses(List.of(tr))
                 .build());
+    }
+
+    /**
+     * 闭合链尾未响应的 toolCall：中断/HITL 暂停落库前调用，
+     * 为最后一个 assistant(tool_calls) 中缺失响应的调用补占位 ToolResponse，
+     * 保证落库消息链满足每个 tool_call 必跟 tool 响应的协议。
+     * 快照已在此之前落库，占位不会进入暂停快照（恢复时按快照自行补工具结果）。
+     */
+    public void closeDanglingToolCalls(List<Message> messages, AgentRuntimeContext runtimeCtx) {
+        // 从链尾跳过连续的 ToolResponse，定位待闭合的 assistant(tool_calls)
+        int idx = messages.size() - 1;
+        while (idx >= 0 && messages.get(idx) instanceof ToolResponseMessage) {
+            idx--;
+        }
+        if (idx < 0 || !(messages.get(idx) instanceof AssistantMessage am)
+                || am.getToolCalls() == null || am.getToolCalls().isEmpty()) {
+            return;
+        }
+        // 已响应的 tool_call_id（含中断瞬间恰好执行完成的工具，此时不补占位）
+        Set<String> responded = new HashSet<>();
+        for (int i = idx + 1; i < messages.size(); i++) {
+            for (ToolResponseMessage.ToolResponse tr : ((ToolResponseMessage) messages.get(i)).getResponses()) {
+                responded.add(tr.id());
+            }
+        }
+        for (AssistantMessage.ToolCall tc : am.getToolCalls()) {
+            if (responded.contains(tc.id())) {
+                continue;
+            }
+            Message placeholder = ToolResponseMessage.builder()
+                    .responses(List.of(new ToolResponseMessage.ToolResponse(
+                            tc.id(), tc.name(),
+                            PromptConstants.buildInterruptPlaceholderMessage(tc.name(), tc.arguments()))))
+                    .build();
+            messages.add(placeholder);
+            if (runtimeCtx != null) {
+                runtimeCtx.appendOriginalMessage(placeholder);
+            }
+        }
     }
 
     public List<Message> collectToolCallMessages(AssistantMessage.ToolCall toolCall,

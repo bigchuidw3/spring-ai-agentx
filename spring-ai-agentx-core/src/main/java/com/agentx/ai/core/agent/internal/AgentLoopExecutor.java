@@ -650,6 +650,8 @@ public class AgentLoopExecutor {
                 interruptContext.flushPartialOutput(execCtx);
                 PauseState snapshot = interruptContext.buildSnapshot(msg, execCtx, roundCounter.get());
                 sessionPersister.persistPauseState(snapshot);
+                // 闭合链尾未响应的 toolCall（快照已落库，占位不进快照）
+                toolCallExecutor.closeDanglingToolCalls(messages, execCtx);
                 // 标记中断态并显式落库后再发射 Paused + complete sink，避免 doFinally 时序竞态
                 execCtx.markTerminal("interrupted");
                 sessionPersister.persistOnTerminal(execCtx, messages, SignalType.CANCEL);
@@ -897,6 +899,9 @@ public class AgentLoopExecutor {
                     .build();
 
             sessionPersister.persistPauseState(pauseState);
+
+            // 闭合 pending 工具缺失的响应（快照已落库，占位不进快照）
+            toolCallExecutor.closeDanglingToolCalls(messages, execCtx);
 
             // 记录 trace（暂停前）
             sessionPersister.recordTrace(execCtx, round, requestJson, sessionPersister.serializeToolCalls(safeToolCalls),
