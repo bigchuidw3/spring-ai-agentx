@@ -11,12 +11,15 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.ToolResponseMessage;
 import reactor.core.publisher.Sinks;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -167,8 +170,14 @@ public class InterruptContext {
                                     long currentRound) {
         List<Message> messagesSnapshot = new ArrayList<>(messagesRef);
 
+        // 以消息链为准对账：工具已完成、结果已入链的调用不再视为待执行，
+        // 避免恢复时重复注入工具响应（工具完成到下一轮开始的窗口内中断会命中）
+        Set<String> respondedIds = collectRespondedToolCallIds(messagesSnapshot);
         List<PendingToolCall> pending = new ArrayList<>();
         for (AssistantMessage.ToolCall tc : pendingToolCalls.get()) {
+            if (respondedIds.contains(tc.id())) {
+                continue;
+            }
             pending.add(new PendingToolCall(tc.id(), tc.name(), tc.arguments()));
         }
 
@@ -190,6 +199,21 @@ public class InterruptContext {
                 .totalPromptTokens(promptTokens)
                 .totalCompletionTokens(completionTokens)
                 .build();
+    }
+
+    /**
+     * 收集消息链上已有 ToolResponse 的 tool_call_id，供快照对账。
+     */
+    private static Set<String> collectRespondedToolCallIds(List<Message> messages) {
+        Set<String> ids = new HashSet<>();
+        for (Message msg : messages) {
+            if (msg instanceof ToolResponseMessage trm) {
+                for (ToolResponseMessage.ToolResponse tr : trm.getResponses()) {
+                    ids.add(tr.id());
+                }
+            }
+        }
+        return ids;
     }
 
     /**

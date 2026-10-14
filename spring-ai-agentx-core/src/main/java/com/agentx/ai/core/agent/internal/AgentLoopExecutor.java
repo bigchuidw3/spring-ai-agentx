@@ -97,6 +97,12 @@ public class AgentLoopExecutor {
      */
     private InterruptContext interruptContext;
 
+    /**
+     * 本次执行注册到的任务身份。工具完成回调据此判断本执行是否仍存活
+     * （identity 比较，同会话后续新执行不影响本判断）。
+     */
+    private volatile AgentTaskManager.TaskInfo currentTask;
+
     private AgentLoopExecutor(Builder builder) {
         this.maxRounds = builder.maxRounds;
         this.maxRetries = builder.maxRetries;
@@ -309,7 +315,8 @@ public class AgentLoopExecutor {
     public AgentResult call(String query, RunnableParams params) {
         String conversationId = params != null ? params.getConversationId() : null;
         if (taskManager != null && conversationId != null) {
-            if (taskManager.registerTask(conversationId, null) == null) {
+            this.currentTask = taskManager.registerTask(conversationId, null);
+            if (this.currentTask == null) {
                 return new AgentResult.Failed("该会话正在执行中，请稍后再试: " + conversationId, AgentErrorCode.CONCURRENT_EXECUTION);
             }
         }
@@ -413,7 +420,8 @@ public class AgentLoopExecutor {
 
         String conversationId = state.getParams() != null ? state.getParams().getConversationId() : null;
         if (taskManager != null && conversationId != null) {
-            if (taskManager.registerTask(conversationId, null) == null) {
+            this.currentTask = taskManager.registerTask(conversationId, null);
+            if (this.currentTask == null) {
                 return new AgentResult.Failed("该会话正在执行中，请稍后再试: " + conversationId,
                         AgentErrorCode.CONCURRENT_EXECUTION);
             }
@@ -507,6 +515,7 @@ public class AgentLoopExecutor {
                 return Flux.error(new AgentException(AgentErrorCode.CONCURRENT_EXECUTION,
                         "该会话正在执行中，请稍后再试: " + conversationId));
             }
+            this.currentTask = taskInfo;
         }
 
         AgentRuntimeContext execCtx = new AgentRuntimeContext(query, params);
@@ -553,6 +562,7 @@ public class AgentLoopExecutor {
                 return Flux.error(new AgentException(AgentErrorCode.CONCURRENT_EXECUTION,
                         "该会话正在执行中，请稍后再试: " + conversationId));
             }
+            this.currentTask = taskInfo;
         }
 
         // 中断恢复（带新指令 resumeQuery）视为一个新请求，轮次从头计；纯 HITL（无新指令）接着原轮次
@@ -607,7 +617,8 @@ public class AgentLoopExecutor {
                     // 确保沙箱在所有终止路径（暂停/中断/错误/取消/断连）上释放
                     fireAfterCallOnce(execCtx, null, 0);
                     if (taskManager != null && conversationId != null) {
-                        taskManager.stopTask(conversationId);
+                        // 只清理自己的任务：中断后同会话新执行可能已注册，无条件 stopTask 会误删
+                        taskManager.removeTaskIfCurrent(conversationId, currentTask);
                     }
                 });
     }
@@ -735,7 +746,7 @@ public class AgentLoopExecutor {
                     llmInvoker.handleStreamError(err, retryAttempt, sink,
                             () -> {
                                 if (taskManager != null && conversationId != null
-                                        && !taskManager.hasRunningTask(conversationId)) {
+                                        && !taskManager.isActiveTask(conversationId, currentTask)) {
                                     log.debug("Task stopped, skip retry: conversationId={}", conversationId);
                                     return;
                                 }
@@ -923,10 +934,10 @@ public class AgentLoopExecutor {
                 state.promptTokens, state.completionTokens, durationMs);
 
         toolCallExecutor.executeToolCallsAsync(sink, safeToolCalls, messages, params, execCtx, () -> {
-            // 工具执行阶段被中断时，任务已被移除，不再调度下一轮模型调用
+            // 工具执行阶段本执行已终止（中断/停止/被顶掉）：identity 判断，同会话新任务不影响本判断
             if (taskManager != null && conversationId != null
-                    && !taskManager.hasRunningTask(conversationId)) {
-                log.debug("Task interrupted during tool execution, skip next round: conversationId={}", conversationId);
+                    && !taskManager.isActiveTask(conversationId, currentTask)) {
+                log.debug("Task not active during tool execution, skip next round: conversationId={}", conversationId);
                 return;
             }
             scheduleRound(messages, sink, roundCounter, params, execCtx, query);
@@ -1030,7 +1041,7 @@ public class AgentLoopExecutor {
                     return llmInvoker.handleStreamError(err, retryAttempt, sink,
                         () -> {
                             String cid = params != null ? params.getConversationId() : null;
-                            if (taskManager != null && cid != null && !taskManager.hasRunningTask(cid)) {
+                            if (taskManager != null && cid != null && !taskManager.isActiveTask(cid, currentTask)) {
                                 log.debug("Task stopped, skip retry: conversationId={}", cid);
                                 return;
                             }

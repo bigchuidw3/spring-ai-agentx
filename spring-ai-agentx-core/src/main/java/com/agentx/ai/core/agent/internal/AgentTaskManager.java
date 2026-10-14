@@ -165,7 +165,9 @@ public class AgentTaskManager {
      * @return true 如果任务存在并已触发中断
      */
     public boolean interrupt(String conversationId, String message) {
-        TaskInfo taskInfo = taskMap.get(conversationId);
+        // 先摘除再触发中断回调：任务身份立即失效，工具完成回调据此不再调度下一轮，
+        // 避免中断后同会话新执行注册导致旧执行的存活判断被误导
+        TaskInfo taskInfo = taskMap.remove(conversationId);
         if (taskInfo == null) {
             log.warn("No running task to interrupt for conversation: {}", conversationId);
             return false;
@@ -244,6 +246,21 @@ public class AgentTaskManager {
 
     public boolean hasRunningTask(String conversationId) {
         return taskMap.containsKey(conversationId);
+    }
+
+    /**
+     * 判断指定任务是否仍为会话的当前活动任务（按任务身份，而非会话是否存在）。
+     * 同会话后续新执行注册的新任务不满足 identity，旧执行的工具回调据此不再调度下一轮。
+     */
+    public boolean isActiveTask(String conversationId, TaskInfo task) {
+        return task != null && taskMap.get(conversationId) == task;
+    }
+
+    /**
+     * 仅当指定任务仍是会话当前活动任务时才移除，防止误删同会话后续新任务。
+     */
+    public boolean removeTaskIfCurrent(String conversationId, TaskInfo task) {
+        return task != null && taskMap.remove(conversationId, task);
     }
 
     public TaskInfo getTask(String conversationId) {
