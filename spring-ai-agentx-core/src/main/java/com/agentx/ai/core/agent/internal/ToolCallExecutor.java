@@ -281,10 +281,13 @@ public class ToolCallExecutor {
                 } finally {
                     int completed = completedCount.incrementAndGet();
                     if (completed >= total) {
-                        appendResultsInOrder(results, messages);
-                        if (runtimeCtx != null) {
-                            for (List<Message> result : results) {
-                                runtimeCtx.appendOriginalMessages(result);
+                        // 与中断回调互斥，避免中断补占位与工具结果双写消息链
+                        synchronized (messages) {
+                            appendResultsInOrder(results, messages);
+                            if (runtimeCtx != null) {
+                                for (List<Message> result : results) {
+                                    runtimeCtx.appendOriginalMessages(result);
+                                }
                             }
                         }
 

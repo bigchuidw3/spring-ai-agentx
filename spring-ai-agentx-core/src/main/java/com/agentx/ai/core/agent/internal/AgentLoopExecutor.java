@@ -324,7 +324,7 @@ public class AgentLoopExecutor {
             return callViaStreamForResult(query, params);
         } finally {
             if (taskManager != null && conversationId != null) {
-                taskManager.removeTask(conversationId);
+                taskManager.removeTaskIfCurrent(conversationId, currentTask);
             }
         }
     }
@@ -434,7 +434,7 @@ public class AgentLoopExecutor {
             return result;
         } finally {
             if (taskManager != null && conversationId != null) {
-                taskManager.removeTask(conversationId);
+                taskManager.removeTaskIfCurrent(conversationId, currentTask);
             }
         }
     }
@@ -648,24 +648,28 @@ public class AgentLoopExecutor {
         this.interruptContext = new InterruptContext(messages, sink, params, query);
         if (taskManager != null && conversationId != null) {
             taskManager.setInterruptHandler(conversationId, msg -> {
-                // 中断也补落一条 LLM trace：流式被中断拿不到 usage，token 走估算，
-                // 避免 conversation 的 token/成本归零、agentx_trace 缺失本轮记录。
-                // 必须在 flushPartialOutput 之前落，此时 messages 仍是纯输入，prompt 估算不含本轮已产出内容。
-                sessionPersister.recordTraceInterrupted(execCtx, (int) roundCounter.get(),
-                        llmInvoker.getLastRequestJson(),
-                        interruptContext.getPartialText(),
-                        interruptContext.getPartialReasoning(),
-                        messages,
-                        System.currentTimeMillis() - interruptContext.getRoundStartTime());
-                // 中断前把本轮部分回复刷进 messages，纯文本（无工具调用）回复也能落库
-                interruptContext.flushPartialOutput(execCtx);
-                PauseState snapshot = interruptContext.buildSnapshot(msg, execCtx, roundCounter.get());
-                sessionPersister.persistPauseState(snapshot);
-                // 闭合链尾未响应的 toolCall（快照已落库，占位不进快照）
-                toolCallExecutor.closeDanglingToolCalls(messages, execCtx);
-                // 标记中断态并显式落库后再发射 Paused + complete sink，避免 doFinally 时序竞态
-                execCtx.markTerminal("interrupted");
-                sessionPersister.persistOnTerminal(execCtx, messages, SignalType.CANCEL);
+                // 中断相关读写与工具线程写链互斥，避免双写消息链（占位 + 迟到结果）
+                PauseState snapshot;
+                synchronized (messages) {
+                    // 中断也补落一条 LLM trace：流式被中断拿不到 usage，token 走估算，
+                    // 避免 conversation 的 token/成本归零、agentx_trace 缺失本轮记录。
+                    // 必须在 flushPartialOutput 之前落，此时 messages 仍是纯输入，prompt 估算不含本轮已产出内容。
+                    sessionPersister.recordTraceInterrupted(execCtx, (int) roundCounter.get(),
+                            llmInvoker.getLastRequestJson(),
+                            interruptContext.getPartialText(),
+                            interruptContext.getPartialReasoning(),
+                            messages,
+                            System.currentTimeMillis() - interruptContext.getRoundStartTime());
+                    // 中断前把本轮部分回复刷进 messages，纯文本（无工具调用）回复也能落库
+                    interruptContext.flushPartialOutput(execCtx);
+                    snapshot = interruptContext.buildSnapshot(msg, execCtx, roundCounter.get());
+                    sessionPersister.persistPauseState(snapshot);
+                    // 闭合链尾未响应的 toolCall（快照已落库，占位不进快照）
+                    toolCallExecutor.closeDanglingToolCalls(messages, execCtx);
+                    // 标记中断态并显式落库后再发射 Paused + complete sink，避免 doFinally 时序竞态
+                    execCtx.markTerminal("interrupted");
+                    sessionPersister.persistOnTerminal(execCtx, messages, SignalType.CANCEL);
+                }
                 interruptContext.emitPausedAndComplete(snapshot);
             });
         }
@@ -863,11 +867,6 @@ public class AgentLoopExecutor {
         // 校验并修复不合法的 tool call arguments，防止后续 API 调用 400
         List<AssistantMessage.ToolCall> safeToolCalls = toolCallExecutor.sanitizeToolCalls(state.toolCalls);
 
-        // 先标记工具阶段并缓存工具清单：tool_calls 入链后任意时刻中断，快照都能表达待执行状态
-        if (interruptContext != null) {
-            interruptContext.enterToolExecution(safeToolCalls);
-        }
-
         // tool call 路径：构建 AssistantMessage 时携带 reasoningContent（通过 properties 传递）
         Map<String, Object> props = thinkingModeProcessor.buildReasoningProperties(state);
         AssistantMessage assistantMsg = AssistantMessage.builder()
@@ -875,8 +874,15 @@ public class AgentLoopExecutor {
                 .toolCalls(safeToolCalls)
                 .properties(props)
                 .build();
-        messages.add(assistantMsg);
-        execCtx.appendOriginalMessage(assistantMsg);
+
+        // 记 pending 与 tool_calls 入链原子：避免中断在"已记 pending、未入链"窗口拍出矛盾快照
+        synchronized (messages) {
+            if (interruptContext != null) {
+                interruptContext.enterToolExecution(safeToolCalls);
+            }
+            messages.add(assistantMsg);
+            execCtx.appendOriginalMessage(assistantMsg);
+        }
 
         if (maxRounds > 0 && roundCounter.get() >= maxRounds) {
             log.debug("Max rounds reached, forcing final answer: conversationId={}", conversationId);
@@ -973,10 +979,12 @@ public class AgentLoopExecutor {
     private void forceFinalStream(List<Message> messages, Sinks.Many<AgentStreamEvent> sink,
                                   RunnableParams params, AgentRuntimeContext execCtx, String query, int retryAttempt) {
         // 闭合最后一轮未执行的 tool_calls（直接追加到原 messages，使终态落库能完整记录）
-        if (!messages.isEmpty() && messages.get(messages.size() - 1) instanceof AssistantMessage lastMsg) {
-            if (lastMsg.getToolCalls() != null && !lastMsg.getToolCalls().isEmpty()) {
-                for (AssistantMessage.ToolCall tc : lastMsg.getToolCalls()) {
-                    toolCallExecutor.addNormalToolMessage(tc, "Agent maximum rounds reached. Tool execution skipped.", messages);
+        synchronized (messages) {
+            if (!messages.isEmpty() && messages.get(messages.size() - 1) instanceof AssistantMessage lastMsg) {
+                if (lastMsg.getToolCalls() != null && !lastMsg.getToolCalls().isEmpty()) {
+                    for (AssistantMessage.ToolCall tc : lastMsg.getToolCalls()) {
+                        toolCallExecutor.addNormalToolMessage(tc, "Agent maximum rounds reached. Tool execution skipped.", messages);
+                    }
                 }
             }
         }
@@ -1020,8 +1028,10 @@ public class AgentLoopExecutor {
                                 .content(answerBuffer.toString())
                                 .properties(props)
                                 .build();
-                        messages.add(finalAssistant);
-                        execCtx.appendOriginalMessage(finalAssistant);
+                        synchronized (messages) {
+                            messages.add(finalAssistant);
+                            execCtx.appendOriginalMessage(finalAssistant);
+                        }
                     }
                     // 标记终态：显式落库后再 complete sink，避免 doFinally 时序竞态
                     execCtx.markTerminal("completed");
