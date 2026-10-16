@@ -8,6 +8,7 @@ import com.agentx.ai.rag.common.ImageReferences;
 import com.agentx.ai.rag.common.MetadataKeys;
 import com.agentx.ai.rag.common.TableReferences;
 import com.agentx.ai.rag.common.UuidChunkIdGenerator;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.transformer.splitter.TextSplitter;
 
@@ -26,6 +27,7 @@ import java.util.Objects;
  *
  * @author bigchui
  */
+@Slf4j
 public abstract class AbstractDocumentSplitter extends TextSplitter {
 
     public static final int DEFAULT_CHUNK_SIZE = 512;
@@ -171,7 +173,7 @@ public abstract class AbstractDocumentSplitter extends TextSplitter {
         }
         ContentProtector protector = ContentProtector.protect(text, preserveImageRef, preserveTableRef);
         if (protector.hasProtectedContent()) {
-            return splitCodePoints(protector.protectedText(), chunkSize, overlap).stream()
+            return protector.splitProtectedByLength(protector.protectedText(), chunkSize, overlap).stream()
                     .map(protector::restore)
                     .toList();
         }
@@ -228,6 +230,8 @@ public abstract class AbstractDocumentSplitter extends TextSplitter {
             metadata.remove(SPRING_PARENT_DOCUMENT_ID);
 
             result.add(buildDocument(chunk.getText(), chunkId, metadata, chunk.getScore()));
+            log.info("[RAG切块] splitter={}, chunkIndex={}/{}, chunkId={}, textLength={}",
+                    getClass().getSimpleName(), chunkIndex, chunkTotal, chunkId, chunk.getText().length());
         }
         return result;
     }

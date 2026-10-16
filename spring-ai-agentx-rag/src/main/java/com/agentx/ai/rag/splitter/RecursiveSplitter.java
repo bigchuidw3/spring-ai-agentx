@@ -58,33 +58,36 @@ public class RecursiveSplitter extends AbstractDocumentSplitter {
     protected List<String> splitText(String text) {
         ContentProtector protector = createProtector(text);
         if (protector.hasProtectedContent()) {
-            return splitRecursive(protector.protectedText(), 0).stream()
+            return splitRecursive(protector.protectedText(), 0, protector).stream()
                     .map(protector::restore)
                     .toList();
         }
-        return splitRecursive(text, 0);
+        return splitRecursive(text, 0, null);
     }
 
-    private List<String> splitRecursive(String text, int depth) {
+    private List<String> splitRecursive(String text, int depth, ContentProtector protector) {
         if (text == null || text.isBlank()) {
             return List.of();
         }
-        if (codePointLength(text) <= chunkSize()) {
+        if (length(text, protector) <= chunkSize()) {
             return List.of(text);
         }
         if (depth >= separators.size()) {
-            return splitFixedWindow(text, chunkSize(), overlap(),
-                    preserveImageRef(), preserveTableRef());
+            // 受保护文本兜底：按真实长度、原子边界切分（占位符由 splitText 统一 restore）
+            return protector == null
+                    ? splitFixedWindow(text, chunkSize(), overlap(),
+                            preserveImageRef(), preserveTableRef())
+                    : protector.splitProtectedByLength(text, chunkSize(), overlap());
         }
 
         String separator = separators.get(depth);
         if (separator == null || separator.isEmpty()) {
-            return splitRecursive(text, depth + 1);
+            return splitRecursive(text, depth + 1, protector);
         }
 
         List<String> pieces = splitBySeparator(text, separator);
         if (pieces.size() <= 1) {
-            return splitRecursive(text, depth + 1);
+            return splitRecursive(text, depth + 1, protector);
         }
 
         List<String> result = new ArrayList<>();
@@ -93,26 +96,26 @@ public class RecursiveSplitter extends AbstractDocumentSplitter {
             if (piece == null || piece.isBlank()) {
                 continue;
             }
-            if (codePointLength(piece) > chunkSize()) {
-                flush(mergeable, result);
-                result.addAll(splitRecursive(piece, depth + 1));
+            if (length(piece, protector) > chunkSize()) {
+                flush(mergeable, result, protector);
+                result.addAll(splitRecursive(piece, depth + 1, protector));
             } else {
                 mergeable.add(piece);
             }
         }
-        flush(mergeable, result);
+        flush(mergeable, result, protector);
         return result;
     }
 
-    private void flush(List<String> pieces, List<String> result) {
+    private void flush(List<String> pieces, List<String> result, ContentProtector protector) {
         if (pieces.isEmpty()) {
             return;
         }
-        result.addAll(mergePieces(pieces));
+        result.addAll(mergePieces(pieces, protector));
         pieces.clear();
     }
 
-    private List<String> mergePieces(List<String> pieces) {
+    private List<String> mergePieces(List<String> pieces, ContentProtector protector) {
         List<String> result = new ArrayList<>();
         StringBuilder current = new StringBuilder();
 
@@ -122,7 +125,7 @@ public class RecursiveSplitter extends AbstractDocumentSplitter {
                 continue;
             }
 
-            if (codePointLength(current.toString()) + codePointLength(piece) <= chunkSize()) {
+            if (length(current.toString(), protector) + length(piece, protector) <= chunkSize()) {
                 current.append(piece);
                 continue;
             }
@@ -130,8 +133,10 @@ public class RecursiveSplitter extends AbstractDocumentSplitter {
             String currentText = current.toString();
             result.add(currentText);
 
-            int prefixLength = Math.min(overlap(), Math.max(0, chunkSize() - codePointLength(piece)));
-            String overlapPrefix = suffixByCodePoints(currentText, prefixLength);
+            int prefixLength = Math.min(overlap(), Math.max(0, chunkSize() - length(piece, protector)));
+            String overlapPrefix = protector == null
+                    ? suffixByCodePoints(currentText, prefixLength)
+                    : protector.suffixByRealLength(currentText, prefixLength);
             current = new StringBuilder(overlapPrefix).append(piece);
         }
 
@@ -139,6 +144,10 @@ public class RecursiveSplitter extends AbstractDocumentSplitter {
             result.add(current.toString());
         }
         return result;
+    }
+
+    private static int length(String value, ContentProtector protector) {
+        return protector == null ? codePointLength(value) : protector.realLength(value);
     }
 
     private List<String> splitBySeparator(String text, String separator) {

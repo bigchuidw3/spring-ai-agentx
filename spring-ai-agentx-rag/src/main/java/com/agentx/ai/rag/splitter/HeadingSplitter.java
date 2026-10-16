@@ -9,6 +9,7 @@ import com.agentx.ai.rag.common.TableReferences;
 import com.agentx.ai.rag.common.UuidChunkIdGenerator;
 import com.agentx.ai.rag.exception.RagErrorCode;
 import com.agentx.ai.rag.exception.RagException;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.transformer.splitter.TextSplitter;
 
@@ -29,11 +30,20 @@ import java.util.regex.Pattern;
  *
  * @author bigchui
  */
+@Slf4j
 public final class HeadingSplitter extends TextSplitter {
 
     private static final Pattern HEADING_PATTERN = Pattern.compile("^(#{1,6})\\s+(.+?)\\s*#*$");
 
     public static final int DEFAULT_MAX_HEADING_LEVEL = 2;
+
+    /**
+     * 父块默认最大 code point 数。父块会被拼成工具结果返回给 Agent，默认取 ReactAgent
+     * 工具结果源头卸载阈值（toolResultEvictionChars，默认 20000 字符）的一个安全比例，
+     * 避免单段图片/表格描述堆叠的父块撑爆 Agent 上下文。可通过 {@link Builder#maxParentSize(int)} 覆盖，
+     * 传 0 恢复为不限制。
+     */
+    public static final int DEFAULT_MAX_PARENT_SIZE = 8000;
 
     private final int maxHeadingLevel;
     private final int chunkSize;
@@ -213,6 +223,8 @@ public final class HeadingSplitter extends TextSplitter {
 
     private Document buildDocument(String text, String id, Map<String, Object> metadata, Double score) {
         applyContentMetadata(metadata, text, chunkSize);
+        log.info("[RAG切块] role={}, chunkId={}, textLength={}",
+                metadata.get(MetadataKeys.CHUNK_ROLE), id, text.length());
         Document.Builder builder = Document.builder()
                 .id(id)
                 .text(text)
@@ -349,7 +361,7 @@ public final class HeadingSplitter extends TextSplitter {
         private boolean enableParentChild;
         private boolean stripHeadings;
         private int chunkSize = AbstractDocumentSplitter.DEFAULT_CHUNK_SIZE;
-        private int maxParentSize = 0;
+        private int maxParentSize = DEFAULT_MAX_PARENT_SIZE;
         private int overlap = AbstractDocumentSplitter.DEFAULT_OVERLAP;
         private boolean preserveImageRef = true;
         private boolean preserveTableRef = true;
@@ -377,7 +389,9 @@ public final class HeadingSplitter extends TextSplitter {
         }
 
         /**
-         * 父块最大字符数，超过则拆成多个子父块；0 表示不限制。
+         * 父块最大 code point 数，超过则拆成多个子父块；0 表示不限制。
+         * 默认 {@link #DEFAULT_MAX_PARENT_SIZE}。父块会作为检索结果返回给 Agent，
+         * 建议保持不超过 Agent 工具结果的卸载阈值（ReactAgent toolResultEvictionChars）。
          */
         public Builder maxParentSize(int maxParentSize) {
             this.maxParentSize = maxParentSize;

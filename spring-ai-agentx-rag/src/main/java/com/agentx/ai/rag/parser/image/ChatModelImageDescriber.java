@@ -68,13 +68,28 @@ public final class ChatModelImageDescriber implements ImageDescriber {
     }
 
     private String prompt(ImageDescriptionRequest request) {
-        return "你是文档图片理解引擎。请根据图片和所属文档信息生成用于知识库检索的图片描述。"
-                + "要求说明图片类型、场景、对象、布局、流程、数据和图中重要文字；"
-                + "结合上下文说明图片的作用；不要编造不存在的信息。"
-                + "直接输出纯文本，不要换行，不要 Markdown，不要额外解释。"
-                + "所属文档：" + request.documentFileName()
-                + "；图片标题：" + request.caption()
-                + "；图片文件：" + request.imageFileName() + "。";
+        return """
+                你是文档图片理解引擎。请生成一段用于知识库检索的图片描述，做到「精简且全面」：
+                用最少的字覆盖最多的信息点，不遗漏关键细节。
+
+                必须覆盖的信息点：
+                - 图片类型与场景
+                - 主体对象及其关系、布局/结构
+                - 流程或操作步骤（如有）
+                - 关键数据（数字、单位、比例、阈值）
+                - 图中出现的所有重要文字（按钮、菜单、状态、专有名词等）
+                - 结合所属文档上下文点明图片的作用
+
+                表达规则：
+                1. 用短句、名词短语、顿号罗列，删除形容词、修饰语和无信息量的连接词。
+                2. 信息密度优先，杜绝重复表达；通常 150 字以内即可，复杂示意图以完整为准。
+                3. 只陈述事实，不编造；看不清的内容不要猜测。
+                4. 直接输出纯文本，不要换行，不要 Markdown，不要标题，不要额外解释。
+
+                所属文档：%s
+                图片标题：%s
+                图片文件：%s
+                """.formatted(request.documentFileName(), request.caption(), request.imageFileName());
     }
 
     private static String defaultModelName(ChatModel chatModel) {
