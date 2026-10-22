@@ -167,7 +167,9 @@ public class InterruptContext {
      */
     public PauseState buildSnapshot(String interruptMessage,
                                     AgentRuntimeContext runtimeCtx,
-                                    long currentRound) {
+                                    long currentRound,
+                                    String agentKey,
+                                    String parentToolCallId) {
         List<Message> messagesSnapshot = new ArrayList<>(messagesRef);
 
         // 以消息链为准对账：工具已完成、结果已入链的调用不再视为待执行，
@@ -198,6 +200,8 @@ public class InterruptContext {
                 .sessionId(sessionId)
                 .totalPromptTokens(promptTokens)
                 .totalCompletionTokens(completionTokens)
+                .agentKey(agentKey)
+                .parentToolCallId(parentToolCallId)
                 .build();
     }
 

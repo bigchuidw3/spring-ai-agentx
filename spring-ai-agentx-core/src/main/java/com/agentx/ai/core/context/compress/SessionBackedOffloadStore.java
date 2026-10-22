@@ -14,9 +14,11 @@ import java.util.UUID;
 public class SessionBackedOffloadStore implements OffloadStore {
 
     private final SessionMessageStore sessionMessageStore;
+    private final String agentKey;
 
-    public SessionBackedOffloadStore(SessionMessageStore sessionMessageStore) {
+    public SessionBackedOffloadStore(SessionMessageStore sessionMessageStore, String agentKey) {
         this.sessionMessageStore = sessionMessageStore;
+        this.agentKey = agentKey != null ? agentKey : "master";
     }
 
     @Override
@@ -25,7 +27,7 @@ public class SessionBackedOffloadStore implements OffloadStore {
             return null;
         }
         String uuid = UUID.randomUUID().toString();
-        sessionMessageStore.appendOffloadMessages(conversationId, sessionId, userId, uuid, messages);
+        sessionMessageStore.appendOffloadMessages(conversationId, agentKey, sessionId, userId, uuid, messages);
         return uuid;
     }
 
@@ -34,6 +36,6 @@ public class SessionBackedOffloadStore implements OffloadStore {
         if (conversationId == null || uuid == null || sessionMessageStore == null) {
             return List.of();
         }
-        return sessionMessageStore.getOffloaded(conversationId, uuid);
+        return sessionMessageStore.getOffloaded(conversationId, agentKey, uuid);
     }
 }

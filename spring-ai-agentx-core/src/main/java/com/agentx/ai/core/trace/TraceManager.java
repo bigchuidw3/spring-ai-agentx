@@ -1,6 +1,6 @@
 package com.agentx.ai.core.trace;
 
-import java.sql.Timestamp;
+import java.time.LocalDateTime;
 
 /**
  * 每对话一个实例，持有 sessionId + conversationId + TraceStore。
@@ -16,16 +16,28 @@ public class TraceManager {
     private final long sessionId;
     private final String conversationId;
     private final String userId;
+    private final String agentKey;
+    private final String parentToolCallId;
 
-    public TraceManager(TraceStore traceStore, long sessionId, String conversationId, String userId) {
+    public TraceManager(TraceStore traceStore, long sessionId, String conversationId, String userId,
+                        String agentKey, String parentToolCallId) {
         this.traceStore = traceStore;
         this.sessionId = sessionId;
         this.conversationId = conversationId;
         this.userId = userId;
+        this.agentKey = agentKey;
+        this.parentToolCallId = parentToolCallId;
     }
 
     public long getSessionId() {
         return sessionId;
+    }
+
+    /**
+     * 由「记录时刻 − 耗时」反推 span 开始时刻，与 OTel span 的 start_time 语义对齐。
+     */
+    private static LocalDateTime spanStartTime(long durationMs) {
+        return LocalDateTime.now().minusNanos(durationMs * 1_000_000);
     }
 
     /**
@@ -41,20 +53,20 @@ public class TraceManager {
      */
     public void trace(int round, String inputData, String outputData, String think,
                       int promptTokens, int completionTokens, long durationMs, Long compactId) {
-        traceStore.save(sessionId, conversationId, userId, round,
+        traceStore.save(sessionId, conversationId, userId, agentKey, parentToolCallId, round,
                 inputData, outputData, think,
                 promptTokens, completionTokens, durationMs, true, null,
-                new Timestamp(System.currentTimeMillis()), compactId);
+                spanStartTime(durationMs), compactId);
     }
 
     /**
      * 记录一次失败的 LLM 调用 trace。
      */
     public void traceError(int round, String inputData, long durationMs, String errorMessage) {
-        traceStore.save(sessionId, conversationId, userId, round,
+        traceStore.save(sessionId, conversationId, userId, agentKey, parentToolCallId, round,
                 inputData, null, null,
                 0, 0, durationMs, false, errorMessage,
-                new Timestamp(System.currentTimeMillis()), null);
+                spanStartTime(durationMs), null);
     }
 
     /**
@@ -72,10 +84,10 @@ public class TraceManager {
     public void traceTool(int round, String toolName, String toolCallId,
                           String arguments, String result,
                           boolean success, long durationMs, String errorMessage) {
-        traceStore.saveTool(sessionId, conversationId, userId, round,
+        traceStore.saveTool(sessionId, conversationId, userId, agentKey, parentToolCallId, round,
                 toolName, toolCallId, arguments, result,
                 success, durationMs, errorMessage,
-                new Timestamp(System.currentTimeMillis()));
+                spanStartTime(durationMs));
     }
 
     /**
@@ -87,8 +99,8 @@ public class TraceManager {
      * @param durationMs  压缩耗时（毫秒）
      */
     public long traceCompaction(int round, String strategy, String summaryJson, long durationMs) {
-        return traceStore.saveCompaction(sessionId, conversationId, userId, round,
+        return traceStore.saveCompaction(sessionId, conversationId, userId, agentKey, parentToolCallId, round,
                 strategy, summaryJson, durationMs,
-                new Timestamp(System.currentTimeMillis()));
+                spanStartTime(durationMs));
     }
 }

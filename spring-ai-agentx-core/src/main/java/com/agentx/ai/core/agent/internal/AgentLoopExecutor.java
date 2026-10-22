@@ -91,6 +91,8 @@ public class AgentLoopExecutor {
      * 会话/Trace/暂停状态的持久化入口，集中所有落库副作用。
      */
     private final SessionPersister sessionPersister;
+    /** 消息分区归属：master / 子 agent 名。 */
+    private final String agentKey;
 
     /**
      * 每次执行（stream/call）独立创建，跟踪当前轮阶段以支持用户主动中断。
@@ -107,6 +109,7 @@ public class AgentLoopExecutor {
         this.maxRounds = builder.maxRounds;
         this.maxRetries = builder.maxRetries;
         this.askUserToolName = builder.askUserToolName;
+        this.agentKey = builder.agentKey;
         this.taskManager = builder.taskManager;
         this.thinkingMode = builder.thinkingMode;
         this.thinkingModeProcessor = new ThinkingModeProcessor(builder.thinkingMode);
@@ -151,14 +154,16 @@ public class AgentLoopExecutor {
         this.sessionPersister = new SessionPersister(
                 builder.enableSession, builder.enableTrace,
                 builder.conversationStore, builder.sessionMessageStore,
-                builder.traceStore, builder.stateStore, memoryPersistor);
+                builder.traceStore, builder.stateStore, memoryPersistor,
+                builder.agentKey,
+                builder.parentSessionId, builder.parentToolCallId);
 
         // 消息构建器
         boolean hasTodoWrite = map.containsKey("TodoWrite");
         this.messageBuilder = new LoopMessageBuilder(
                 builder.instructions, builder.sessionMessageStore,
                 memoryInjector, builder.thinkingMode, builder.deferredToolRegistry,
-                hasTodoWrite, builder.enableSession);
+                hasTodoWrite, builder.enableSession, builder.agentKey);
 
         // 工具调用执行器
         this.toolCallExecutor = new ToolCallExecutor(toolMap, new ObjectMapper(),
@@ -181,6 +186,9 @@ public class AgentLoopExecutor {
         private LongTermMemoryManager longTermMemoryManager;
         private boolean enableSession = true;
         private boolean enableTrace = true;
+        private String agentKey = "master";
+        private String parentSessionId;
+        private String parentToolCallId;
         private String askUserToolName;
         private List<AgentHook> hooks;
         private ThinkingMode thinkingMode = ThinkingMode.DISABLED;
@@ -263,6 +271,21 @@ public class AgentLoopExecutor {
             return this;
         }
 
+        public Builder agentKey(String v) {
+            this.agentKey = v;
+            return this;
+        }
+
+        public Builder parentSessionId(String v) {
+            this.parentSessionId = v;
+            return this;
+        }
+
+        public Builder parentToolCallId(String v) {
+            this.parentToolCallId = v;
+            return this;
+        }
+
         public Builder askUserToolName(String v) {
             this.askUserToolName = v;
             return this;
@@ -335,8 +358,10 @@ public class AgentLoopExecutor {
     private AgentResult callViaStreamForResult(String query, RunnableParams params) {
         BuiltMessages built = messageBuilder.buildInitialMessages(query, params);
         List<Message> messages = built.messages();
-        Sinks.Many<AgentStreamEvent> sink = Sinks.many().unicast().onBackpressureBuffer();
+        Sinks.Many<AgentStreamEvent> sink = new SerializedEventSink(
+                Sinks.many().unicast().onBackpressureBuffer());
         AgentRuntimeContext execCtx = new AgentRuntimeContext(query, params);
+        execCtx.setAgentKey(agentKey);
         execCtx.setNewMsgStartIndex(built.newMsgStartIndex());
         execCtx.setOriginalMessagesSnapshot(new ArrayList<>(messages));
         sessionPersister.initSession(execCtx, params, query);
@@ -348,7 +373,7 @@ public class AgentLoopExecutor {
 
         registerInterruptContext(messages, sink, params, query, execCtx, roundCounter);
 
-        return blockForResult(messages, sink, roundCounter, params, execCtx, query);
+        return blockForResult(messages, sink, roundCounter, params, execCtx, query, List.of(), Map.of());
     }
 
     /**
@@ -359,8 +384,10 @@ public class AgentLoopExecutor {
                                        AtomicLong roundCounter,
                                        RunnableParams params,
                                        AgentRuntimeContext execCtx,
-                                       String query) {
-        scheduleRound(messages, sink, roundCounter, params, execCtx, query);
+                                       String query,
+                                       List<AssistantMessage.ToolCall> pendingSubAgentCalls,
+                                       Map<String, PauseState> childSnapshots) {
+        startRound(pendingSubAgentCalls, childSnapshots, messages, sink, roundCounter, params, execCtx, query);
 
         StringBuilder answer = new StringBuilder();
         StringBuilder think = new StringBuilder();
@@ -413,11 +440,31 @@ public class AgentLoopExecutor {
     }
 
     /**
+     * 启动恢复后的首轮：有 pending 子 Agent 工具时先流式续跑（复用正常工具执行路径），
+     * 续跑完成后再调度 master 轮；否则直接调度 master 轮。
+     */
+    private void startRound(List<AssistantMessage.ToolCall> pendingSubAgentCalls,
+                            Map<String, PauseState> childSnapshots,
+                            List<Message> messages, Sinks.Many<AgentStreamEvent> sink,
+                            AtomicLong roundCounter, RunnableParams params,
+                            AgentRuntimeContext execCtx, String query) {
+        if (pendingSubAgentCalls.isEmpty()) {
+            scheduleRound(messages, sink, roundCounter, params, execCtx, query);
+        } else {
+            // 续跑的子 Agent 工具也要进入 TOOL_EXECUTION 安全点（对齐 finishRound），
+            // 否则执行中被中断会拍出 pendingToolCalls 为空的坏快照，导致二次恢复丢失该工具
+            if (interruptContext != null) {
+                interruptContext.enterToolExecution(pendingSubAgentCalls);
+            }
+            toolCallExecutor.executeToolCallsAsync(sink, pendingSubAgentCalls, childSnapshots, messages,
+                    params, execCtx, () -> scheduleRound(messages, sink, roundCounter, params, execCtx, query));
+        }
+    }
+
+    /**
      * 从暂停状态恢复执行（非流式）。
      */
     public AgentResult resume(PauseState state, Map<String, String> toolResults) {
-        List<Message> messages = buildResumeMessages(state, toolResults, null);
-
         String conversationId = state.getParams() != null ? state.getParams().getConversationId() : null;
         if (taskManager != null && conversationId != null) {
             this.currentTask = taskManager.registerTask(conversationId, null);
@@ -427,7 +474,7 @@ public class AgentLoopExecutor {
             }
         }
         try {
-            AgentResult result = resumeViaStreamForResult(messages, state, null);
+            AgentResult result = resumeViaStreamForResult(state, toolResults, null);
             if (result instanceof AgentResult.Completed) {
                 sessionPersister.deletePauseState(conversationId);
             }
@@ -442,11 +489,17 @@ public class AgentLoopExecutor {
     /**
      * 流式-backed 恢复执行，委托 blockForResult。
      */
-    private AgentResult resumeViaStreamForResult(List<Message> messages, PauseState state,
+    private AgentResult resumeViaStreamForResult(PauseState state, Map<String, String> toolResults,
                                                  @Nullable String resumeQuery) {
-        Sinks.Many<AgentStreamEvent> sink = Sinks.many().unicast().onBackpressureBuffer();
+        Sinks.Many<AgentStreamEvent> sink = new SerializedEventSink(
+                Sinks.many().unicast().onBackpressureBuffer());
+        List<AssistantMessage.ToolCall> pendingSubAgentCalls = new ArrayList<>();
+        Map<String, PauseState> childSnapshots = new HashMap<>();
+        List<Message> messages = buildResumeMessages(state, toolResults, resumeQuery,
+                pendingSubAgentCalls, childSnapshots);
         AtomicLong roundCounter = new AtomicLong(state.getCurrentRound());
         AgentRuntimeContext execCtx = new AgentRuntimeContext(state.getQuery(), state.getParams());
+        execCtx.setAgentKey(agentKey);
         // 暂停时已落库 [query .. assistant(tool_calls)]，本次恢复只持久化新增的 tool 响应及后续消息
         execCtx.setNewMsgStartIndex(state.getMessages().size());
         execCtx.setOriginalMessagesSnapshot(new ArrayList<>(messages));
@@ -458,7 +511,8 @@ public class AgentLoopExecutor {
 
         registerInterruptContext(messages, sink, state.getParams(), effectiveQuery, execCtx, roundCounter);
 
-        return blockForResult(messages, sink, roundCounter, state.getParams(), execCtx, effectiveQuery);
+        return blockForResult(messages, sink, roundCounter, state.getParams(), execCtx, effectiveQuery,
+                pendingSubAgentCalls, childSnapshots);
     }
 
     /**
@@ -475,20 +529,50 @@ public class AgentLoopExecutor {
             if (resumeQuery != null && !resumeQuery.isBlank()) {
                 return PromptConstants.buildInterruptToolSkippedMessage(ptc.name(), ptc.arguments());
             }
+            // 纯续跑（无新消息）：普通工具重跑（子 Agent 工具在 buildResumeMessages 中走流式续跑）
             return toolCallExecutor.resolveInterruptToolResult(ptc, toolCall, state.getParams());
         }
         return toolCallExecutor.resolveResumeToolResult(ptc, toolCall, toolResults, state.getParams());
     }
 
     /**
+     * 在 master 快照的 children 中按派生它的 toolCallId 查找子 Agent 快照。
+     */
+    private PauseState findChild(PauseState state, String toolCallId) {
+        if (state.getChildren() == null) {
+            return null;
+        }
+        for (PauseState child : state.getChildren()) {
+            if (toolCallId != null && toolCallId.equals(child.getParentToolCallId())) {
+                return child;
+            }
+        }
+        return null;
+    }
+
+    /**
      * 从 PauseState 重建消息列表，注入 pending tool calls 的 ToolResponseMessage。
      */
     private List<Message> buildResumeMessages(PauseState state, Map<String, String> toolResults,
-                                              @Nullable String resumeQuery) {
+                                              @Nullable String resumeQuery,
+                                              List<AssistantMessage.ToolCall> pendingSubAgentCalls,
+                                              Map<String, PauseState> childSnapshots) {
         List<Message> messages = new ArrayList<>(state.getMessages());
+        boolean continueInterrupted = state.getReason() == PauseReason.USER_INTERRUPT
+                && state.getSafePoint() == SafePoint.TOOL_EXECUTION
+                && (resumeQuery == null || resumeQuery.isBlank());
         for (PendingToolCall ptc : state.getPendingToolCalls()) {
             AssistantMessage.ToolCall toolCall = new AssistantMessage.ToolCall(
                     ptc.id(), "function", ptc.name(), ptc.arguments());
+            // 纯续跑且是子 Agent 工具：留待流式续跑（复用正常工具执行路径），不在此同步解析
+            if (continueInterrupted) {
+                PauseState child = findChild(state, ptc.id());
+                if (child != null) {
+                    pendingSubAgentCalls.add(toolCall);
+                    childSnapshots.put(ptc.id(), child);
+                    continue;
+                }
+            }
             String result = resolveToolResult(ptc, toolCall, toolResults, state, resumeQuery);
             toolCallExecutor.addNormalToolMessage(toolCall, result, messages);
         }
@@ -507,7 +591,8 @@ public class AgentLoopExecutor {
         BuiltMessages built = messageBuilder.buildInitialMessages(query, params);
         List<Message> messages = built.messages();
 
-        Sinks.Many<AgentStreamEvent> sink = Sinks.many().unicast().onBackpressureBuffer();
+        Sinks.Many<AgentStreamEvent> sink = new SerializedEventSink(
+                Sinks.many().unicast().onBackpressureBuffer());
 
         if (taskManager != null && conversationId != null) {
             AgentTaskManager.TaskInfo taskInfo = taskManager.registerTask(conversationId, sink);
@@ -519,6 +604,7 @@ public class AgentLoopExecutor {
         }
 
         AgentRuntimeContext execCtx = new AgentRuntimeContext(query, params);
+        execCtx.setAgentKey(agentKey);
         execCtx.setNewMsgStartIndex(built.newMsgStartIndex());
         execCtx.setOriginalMessagesSnapshot(new ArrayList<>(messages));
         execCtx.setMessages(messages);
@@ -549,11 +635,10 @@ public class AgentLoopExecutor {
      */
     public Flux<AgentStreamEvent> resumeStream(PauseState state, Map<String, String> toolResults,
                                                @Nullable String resumeQuery) {
-        List<Message> messages = buildResumeMessages(state, toolResults, resumeQuery);
-
         String conversationId = state.getParams() != null ? state.getParams().getConversationId() : null;
 
-        Sinks.Many<AgentStreamEvent> sink = Sinks.many().unicast().onBackpressureBuffer();
+        Sinks.Many<AgentStreamEvent> sink = new SerializedEventSink(
+                Sinks.many().unicast().onBackpressureBuffer());
 
         if (taskManager != null && conversationId != null) {
             // 注册真正的 sink（非 null），让 stopTask 的 tryEmitComplete 能正常结束下游 Flux
@@ -565,10 +650,17 @@ public class AgentLoopExecutor {
             this.currentTask = taskInfo;
         }
 
+        // 子 Agent 续跑走正常工具执行路径（startRound 先流式续跑再调度 master 轮），sink 先行创建
+        List<AssistantMessage.ToolCall> pendingSubAgentCalls = new ArrayList<>();
+        Map<String, PauseState> childSnapshots = new HashMap<>();
+        List<Message> messages = buildResumeMessages(state, toolResults, resumeQuery,
+                pendingSubAgentCalls, childSnapshots);
+
         // 中断恢复（带新指令 resumeQuery）视为一个新请求，轮次从头计；纯 HITL（无新指令）接着原轮次
         AtomicLong roundCounter = new AtomicLong(
                 resumeQuery != null && !resumeQuery.isBlank() ? 0 : state.getCurrentRound());
         AgentRuntimeContext execCtx = new AgentRuntimeContext(state.getQuery(), state.getParams());
+        execCtx.setAgentKey(agentKey);
         execCtx.setEmitter(sink::tryEmitNext);
         execCtx.setMessages(messages);
         // 暂停时已落库 [query .. assistant(tool_calls)]，本次恢复只持久化新增的 tool 响应及后续消息
@@ -583,7 +675,8 @@ public class AgentLoopExecutor {
         registerInterruptContext(messages, sink, state.getParams(), effectiveQuery, execCtx, roundCounter);
 
         // disposable 的注册由 scheduleRound 内部每轮刷新负责，此处不再手动 setDisposable
-        scheduleRound(messages, sink, roundCounter, state.getParams(), execCtx, effectiveQuery);
+        startRound(pendingSubAgentCalls, childSnapshots, messages, sink, roundCounter,
+                state.getParams(), execCtx, effectiveQuery);
 
         // 正常完成时清理快照（Paused 不能删，会通过 UPSERT 覆盖）
         var wasPaused = new AtomicBoolean(false);
@@ -662,8 +755,21 @@ public class AgentLoopExecutor {
                             System.currentTimeMillis() - interruptContext.getRoundStartTime());
                     // 中断前把本轮部分回复刷进 messages，纯文本（无工具调用）回复也能落库
                     interruptContext.flushPartialOutput(execCtx);
-                    snapshot = interruptContext.buildSnapshot(msg, execCtx, roundCounter.get());
-                    sessionPersister.persistPauseState(snapshot);
+                    String agentKey = sessionPersister.getAgentKey();
+                    String parentToolCallId = sessionPersister.getParentToolCallId();
+                    snapshot = interruptContext.buildSnapshot(msg, execCtx, roundCounter.get(),
+                            agentKey, parentToolCallId);
+                    if (agentKey != null && !"master".equals(agentKey)) {
+                        // 子 agent：仅发布快照供 master 收集，不落库（子 agent 无独立 stateStore）
+                        SubAgentInterruptRegistry.publishSnapshot(conversationId, parentToolCallId, snapshot);
+                    } else {
+                        // master：收集子 agent 快照作为 children 后统一落库
+                        List<PauseState> children = SubAgentInterruptRegistry.takeSnapshots(conversationId);
+                        if (!children.isEmpty()) {
+                            snapshot = snapshot.withChildren(children);
+                        }
+                        sessionPersister.persistPauseState(snapshot);
+                    }
                     // 闭合链尾未响应的 toolCall（快照已落库，占位不进快照）
                     toolCallExecutor.closeDanglingToolCalls(messages, execCtx);
                     // 标记中断态并显式落库后再发射 Paused + complete sink，避免 doFinally 时序竞态
@@ -742,7 +848,7 @@ public class AgentLoopExecutor {
                     finishRound(messages, sink, roundState, roundCounter, params, execCtx, query, durationMs);
                 })
                 .onErrorResume(err -> {
-                    sessionPersister.recordLlmError(execCtx, llmInvoker.getLastRequestJson(), (int) roundCounter.get(), retryAttempt, maxRetries, err.getMessage());
+                    sessionPersister.recordLlmError(execCtx, llmInvoker.getLastRequestJson(), (int) roundCounter.get(), retryAttempt, maxRetries, err.getMessage(), System.currentTimeMillis() - startTime);
                     if (!hookManager.isEmpty()) {
                         hookManager.fireEvent(new ErrorEvent(
                                 execCtx, err, "reasoning", retryAttempt, retryAttempt < maxRetries));
@@ -993,6 +1099,7 @@ public class AgentLoopExecutor {
         StringBuilder reasoningBuffer = new StringBuilder();
         boolean[] inThink = {false};
         final long[] finalUsage = {0, 0};
+        long startTime = System.currentTimeMillis();
 
         Disposable disposable = llmInvoker.buildRoundChatClient().prompt()
                 .messages(messages)
@@ -1043,25 +1150,25 @@ public class AgentLoopExecutor {
                     sink.tryEmitComplete();
                 })
                 .onErrorResume(err -> {
-                    sessionPersister.recordLlmError(execCtx, llmInvoker.getLastRequestJson(), execCtx.getTotalRounds(), retryAttempt, maxRetries, err.getMessage());
+                    sessionPersister.recordLlmError(execCtx, llmInvoker.getLastRequestJson(), execCtx.getTotalRounds(), retryAttempt, maxRetries, err.getMessage(), System.currentTimeMillis() - startTime);
                     if (!hookManager.isEmpty()) {
                         hookManager.fireEvent(new ErrorEvent(
                                 execCtx, err, "forceFinal", retryAttempt, retryAttempt < maxRetries));
                     }
                     return llmInvoker.handleStreamError(err, retryAttempt, sink,
-                        () -> {
-                            String cid = params != null ? params.getConversationId() : null;
-                            if (taskManager != null && cid != null && !taskManager.isActiveTask(cid, currentTask)) {
-                                log.debug("Task stopped, skip retry: conversationId={}", cid);
-                                return;
-                            }
-                            forceFinalStream(messages, sink, params, execCtx, query, retryAttempt + 1);
-                        },
-                        "forceFinal stream error",
-                        () -> {
-                            execCtx.markTerminal("error");
-                            sessionPersister.persistOnTerminal(execCtx, messages, SignalType.ON_ERROR);
-                        });
+                            () -> {
+                                String cid = params != null ? params.getConversationId() : null;
+                                if (taskManager != null && cid != null && !taskManager.isActiveTask(cid, currentTask)) {
+                                    log.debug("Task stopped, skip retry: conversationId={}", cid);
+                                    return;
+                                }
+                                forceFinalStream(messages, sink, params, execCtx, query, retryAttempt + 1);
+                            },
+                            "forceFinal stream error",
+                            () -> {
+                                execCtx.markTerminal("error");
+                                sessionPersister.persistOnTerminal(execCtx, messages, SignalType.ON_ERROR);
+                            });
                 })
                 .subscribe();
 

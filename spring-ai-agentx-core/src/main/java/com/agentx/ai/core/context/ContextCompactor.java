@@ -7,11 +7,13 @@ import com.agentx.ai.core.context.compress.LlmSummarizer;
 import com.agentx.ai.core.context.compress.OffloadStore;
 import com.agentx.ai.core.memory.store.SessionMessageStore;
 import com.agentx.ai.core.trace.TraceManager;
+import io.micrometer.tracing.Tracer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.model.ChatModel;
 
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -32,17 +34,21 @@ public class ContextCompactor {
     private final SessionMessageStore sessionMessageStore;
     private final List<CompressionStrategy> strategies;
     private final LlmSummarizer summarizer;
-    private final CompactionTracer tracer = new CompactionTracer();
+    private final String agentKey;
+    private final CompactionTracer tracer;
 
     public ContextCompactor(ContextPolicy policy, ChatModel chatModel,
                             OffloadStore offloadStore, SessionMessageStore sessionMessageStore,
-                            List<CompressionStrategy> strategies, LlmSummarizer summarizer) {
+                            List<CompressionStrategy> strategies, LlmSummarizer summarizer,
+                            String agentKey, Tracer otelTracer) {
         this.policy = policy;
         this.chatModel = chatModel;
         this.offloadStore = offloadStore;
         this.sessionMessageStore = sessionMessageStore;
         this.strategies = strategies != null ? strategies : new ArrayList<>();
         this.summarizer = summarizer;
+        this.agentKey = agentKey != null ? agentKey : "master";
+        this.tracer = new CompactionTracer(otelTracer);
     }
 
     /**
@@ -123,7 +129,8 @@ public class ContextCompactor {
         }
         try {
             sessionMessageStore.replaceMessages(
-                    conversationId, sessionId, userId, "working_messages", messages);
+                    conversationId, agentKey, sessionId, userId, "working_messages", messages,
+                    null, null, LocalDateTime.now());
         } catch (Exception e) {
             log.warn("[ContextCompactor] Failed to persist working_messages: {}", e.getMessage());
         }

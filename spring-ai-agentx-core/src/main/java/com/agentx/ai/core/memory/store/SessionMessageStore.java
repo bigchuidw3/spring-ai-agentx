@@ -1,5 +1,6 @@
 package com.agentx.ai.core.memory.store;
 
+import com.agentx.ai.core.model.TimedMessage;
 import com.agentx.ai.core.utils.MessageJsonSerializer;
 import com.baomidou.mybatisplus.core.toolkit.IdWorker;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -11,6 +12,7 @@ import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import javax.sql.DataSource;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -31,13 +33,16 @@ public class SessionMessageStore {
             CREATE TABLE agentx_session (
                 id              BIGINT       NOT NULL  COMMENT '主键ID',
                 conversation_id VARCHAR(100) NOT NULL  COMMENT '会话窗口ID',
-                session_id      VARCHAR(100) NOT NULL  COMMENT '本次调用ID',
+                session_id      VARCHAR(100) NOT NULL  COMMENT '会话ID（master=本次调用，subagent=子会话句柄，雪花long）',
+                agent_key       VARCHAR(100) NOT NULL DEFAULT 'master' COMMENT '消息归属：master / 子agent名',
+                parent_session_id VARCHAR(100) DEFAULT NULL COMMENT '父master调用的session_id',
+                parent_tool_call_id VARCHAR(100) DEFAULT NULL COMMENT '派生出本subagent调用的ToolCall id',
                 user_id         VARCHAR(100) DEFAULT NULL COMMENT '用户ID',
                 state_key       VARCHAR(255) NOT NULL  COMMENT '状态键: original_messages / working_messages / offload_context',
                 item_index      INT          NOT NULL DEFAULT 0 COMMENT '消息在状态键内的序号',
                 state_data      LONGTEXT     NOT NULL  COMMENT '消息JSON（MessageJsonSerializer 序列化）',
-                created_at      TIMESTAMP    DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
-                updated_at      TIMESTAMP    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+                created_at      TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP(3) COMMENT '创建时间',
+                updated_at      TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3) COMMENT '更新时间',
                 PRIMARY KEY (id)
             ) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='AgentX会话消息链表'
             """;
@@ -50,30 +55,34 @@ public class SessionMessageStore {
             CREATE INDEX idx_conv_state ON agentx_session (conversation_id, state_key)
             """;
 
+    private static final String CREATE_IDX_AGENT_SQL = """
+            CREATE INDEX idx_conv_agent_state ON agentx_session (conversation_id, agent_key, state_key)
+            """;
+
     private static final String INSERT_SQL = """
-            INSERT INTO agentx_session (id, conversation_id, session_id, user_id, state_key, item_index, state_data, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO agentx_session (id, conversation_id, session_id, agent_key, parent_session_id, parent_tool_call_id, user_id, state_key, item_index, state_data, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """;
 
     private static final String SELECT_SQL = """
             SELECT state_data FROM agentx_session
-            WHERE conversation_id = ? AND state_key = ?
+            WHERE conversation_id = ? AND agent_key = ? AND state_key = ?
             ORDER BY item_index ASC, id ASC
             """;
 
     private static final String MAX_INDEX_SQL = """
             SELECT COALESCE(MAX(item_index), -1) FROM agentx_session
-            WHERE conversation_id = ? AND state_key = ?
+            WHERE conversation_id = ? AND agent_key = ? AND state_key = ?
             """;
 
     private static final String DELETE_BY_CONV_KEY_SQL = """
             DELETE FROM agentx_session
-            WHERE conversation_id = ? AND state_key = ?
+            WHERE conversation_id = ? AND agent_key = ? AND state_key = ?
             """;
 
     private static final String SELECT_OFFLOAD_SQL = """
             SELECT state_data FROM agentx_session
-            WHERE conversation_id = ? AND state_key = 'offload_context'
+            WHERE conversation_id = ? AND agent_key = ? AND state_key = 'offload_context'
             ORDER BY item_index ASC, id ASC
             """;
 
@@ -113,9 +122,33 @@ public class SessionMessageStore {
                     } catch (Exception e) {
                         log.debug("Index idx_conv_state skipped: {}", e.getMessage());
                     }
+                    try {
+                        jdbcTemplate.execute(CREATE_IDX_AGENT_SQL);
+                    } catch (Exception e) {
+                        log.debug("Index idx_conv_agent_state skipped: {}", e.getMessage());
+                    }
+                    migrateColumns();
                     initialized = true;
                     log.info("agentx_session table initialized");
                 }
+            }
+        }
+    }
+
+    /**
+     * 为存量表补齐 agent 维度列（幂等，列已存在则静默跳过）。
+     */
+    private void migrateColumns() {
+        String[] ddl = {
+                "ALTER TABLE agentx_session ADD COLUMN agent_key VARCHAR(100) NOT NULL DEFAULT 'master'",
+                "ALTER TABLE agentx_session ADD COLUMN parent_session_id VARCHAR(100) DEFAULT NULL",
+                "ALTER TABLE agentx_session ADD COLUMN parent_tool_call_id VARCHAR(100) DEFAULT NULL"
+        };
+        for (String sql : ddl) {
+            try {
+                jdbcTemplate.execute(sql);
+            } catch (Exception e) {
+                log.debug("Column migration skipped (may already exist): {}", e.getMessage());
             }
         }
     }
@@ -125,12 +158,19 @@ public class SessionMessageStore {
      * 用于多轮对话加载历史上下文。
      */
     public List<Message> getMessages(String conversationId, String stateKey) {
-        if (conversationId == null || stateKey == null) {
+        return getMessages(conversationId, "master", stateKey);
+    }
+
+    /**
+     * 加载某会话窗口指定 agent 分区、指定状态键的全部消息。
+     */
+    public List<Message> getMessages(String conversationId, String agentKey, String stateKey) {
+        if (conversationId == null || agentKey == null || stateKey == null) {
             return new ArrayList<>();
         }
         ensureInitialized();
         List<String> jsonList = jdbcTemplate.queryForList(
-                SELECT_SQL, String.class, conversationId, stateKey);
+                SELECT_SQL, String.class, conversationId, agentKey, stateKey);
 
         List<Message> all = new ArrayList<>(jsonList.size() * 2);
         for (String json : jsonList) {
@@ -146,31 +186,43 @@ public class SessionMessageStore {
      * 终态时调用：一次调用新增的消息一次性写入，避免 ReAct 循环中频繁 DB I/O。
      * system 消息属于运行时外部上下文，不进入 agentx_session。
      */
-    public void appendMessages(String conversationId, long sessionId, String userId,
-                               String stateKey, List<Message> messages) {
-        if (conversationId == null || stateKey == null || messages == null || messages.isEmpty()) {
-            return;
-        }
-        List<Message> persistedMessages = filterPersistableMessages(messages);
-        if (persistedMessages.isEmpty()) {
+    public void appendMessages(String conversationId, String agentKey, long sessionId, String userId,
+                               String stateKey, List<TimedMessage> messages,
+                               String parentSessionId, String parentToolCallId) {
+        if (conversationId == null || agentKey == null || stateKey == null
+                || messages == null || messages.isEmpty()) {
             return;
         }
         ensureInitialized();
 
-        Integer maxIndex = jdbcTemplate.queryForObject(MAX_INDEX_SQL, Integer.class, conversationId, stateKey);
+        List<TimedMessage> persisted = new ArrayList<>(messages.size());
+        for (TimedMessage timed : messages) {
+            if (!(timed.message() instanceof SystemMessage)) {
+                persisted.add(timed);
+            }
+        }
+        if (persisted.isEmpty()) {
+            return;
+        }
+
+        Integer maxIndex = jdbcTemplate.queryForObject(MAX_INDEX_SQL, Integer.class,
+                conversationId, agentKey, stateKey);
         int startIndex = (maxIndex == null ? -1 : maxIndex) + 1;
 
         String sessionIdStr = String.valueOf(sessionId);
-        List<Object[]> batchArgs = new ArrayList<>(persistedMessages.size());
-        for (int i = 0; i < persistedMessages.size(); i++) {
-            String data = MessageJsonSerializer.toJson(List.of(persistedMessages.get(i)));
+        List<Object[]> batchArgs = new ArrayList<>(persisted.size());
+        for (int i = 0; i < persisted.size(); i++) {
+            TimedMessage timed = persisted.get(i);
+            String data = MessageJsonSerializer.toJson(List.of(timed.message()));
             batchArgs.add(new Object[]{
-                    IdWorker.getId(), conversationId, sessionIdStr, userId, stateKey, startIndex + i, data
+                    IdWorker.getId(), conversationId, sessionIdStr, agentKey,
+                    parentSessionId, parentToolCallId, userId, stateKey, startIndex + i, data,
+                    timed.createdAt(), timed.createdAt()
             });
         }
         jdbcTemplate.batchUpdate(INSERT_SQL, batchArgs);
-        log.debug("Appended {} messages: conversationId={}, sessionId={}, stateKey={}, startIndex={}",
-                persistedMessages.size(), conversationId, sessionId, stateKey, startIndex);
+        log.debug("Appended {} messages: conversationId={}, agentKey={}, sessionId={}, stateKey={}, startIndex={}",
+                persisted.size(), conversationId, agentKey, sessionId, stateKey, startIndex);
     }
 
     /**
@@ -179,15 +231,27 @@ public class SessionMessageStore {
      */
     public void replaceMessages(String conversationId, long sessionId, String userId,
                                 String stateKey, List<Message> messages) {
-        if (conversationId == null || stateKey == null) {
+        replaceMessages(conversationId, "master", sessionId, userId, stateKey, messages, null, null,
+                LocalDateTime.now());
+    }
+
+    public void replaceMessages(String conversationId, String agentKey, long sessionId, String userId,
+                                String stateKey, List<Message> messages,
+                                String parentSessionId, String parentToolCallId,
+                                LocalDateTime createdAt) {
+        if (conversationId == null || agentKey == null || stateKey == null) {
             return;
         }
-        List<Message> persistedMessages = filterPersistableMessages(messages);
         ensureInitialized();
-        jdbcTemplate.update(DELETE_BY_CONV_KEY_SQL, conversationId, stateKey);
-        appendMessages(conversationId, sessionId, userId, stateKey, persistedMessages);
-        log.debug("Replaced state: conversationId={}, stateKey={}, rows={}",
-                conversationId, stateKey, persistedMessages.size());
+        jdbcTemplate.update(DELETE_BY_CONV_KEY_SQL, conversationId, agentKey, stateKey);
+        List<TimedMessage> timed = new ArrayList<>(messages.size());
+        for (Message message : messages) {
+            timed.add(new TimedMessage(message, createdAt));
+        }
+        appendMessages(conversationId, agentKey, sessionId, userId, stateKey, timed,
+                parentSessionId, parentToolCallId);
+        log.debug("Replaced state: conversationId={}, agentKey={}, stateKey={}",
+                conversationId, agentKey, stateKey);
     }
 
     /**
@@ -205,12 +269,17 @@ public class SessionMessageStore {
 
     public void appendOffloadMessages(String conversationId, long sessionId, String userId,
                                       String uuid, List<Message> messages) {
-        if (conversationId == null || uuid == null || messages == null || messages.isEmpty()) {
+        appendOffloadMessages(conversationId, "master", sessionId, userId, uuid, messages);
+    }
+
+    public void appendOffloadMessages(String conversationId, String agentKey, long sessionId, String userId,
+                                      String uuid, List<Message> messages) {
+        if (conversationId == null || agentKey == null || uuid == null || messages == null || messages.isEmpty()) {
             return;
         }
         ensureInitialized();
         Integer maxIndex = jdbcTemplate.queryForObject(MAX_INDEX_SQL, Integer.class,
-                conversationId, "offload_context");
+                conversationId, agentKey, "offload_context");
         int nextIndex = (maxIndex == null ? -1 : maxIndex) + 1;
 
         String data;
@@ -223,22 +292,26 @@ public class SessionMessageStore {
             throw new IllegalStateException("Failed to serialize offload payload", e);
         }
         jdbcTemplate.update(INSERT_SQL,
-                IdWorker.getId(), conversationId, String.valueOf(sessionId), userId,
-                "offload_context", nextIndex, data);
-        log.debug("Offloaded messages: conversationId={}, uuid={}, itemIndex={}, count={}",
-                conversationId, uuid, nextIndex, messages.size());
+                IdWorker.getId(), conversationId, String.valueOf(sessionId), agentKey, null, null,
+                userId, "offload_context", nextIndex, data, LocalDateTime.now(), LocalDateTime.now());
+        log.debug("Offloaded messages: conversationId={}, agentKey={}, uuid={}, itemIndex={}, count={}",
+                conversationId, agentKey, uuid, nextIndex, messages.size());
     }
 
     /**
      * 按 UUID 从 offload_context 取回原文。不存在返回空列表。
      */
     public List<Message> getOffloaded(String conversationId, String uuid) {
-        if (conversationId == null || uuid == null) {
+        return getOffloaded(conversationId, "master", uuid);
+    }
+
+    public List<Message> getOffloaded(String conversationId, String agentKey, String uuid) {
+        if (conversationId == null || agentKey == null || uuid == null) {
             return List.of();
         }
         ensureInitialized();
         List<String> jsonList = jdbcTemplate.queryForList(
-                SELECT_OFFLOAD_SQL, String.class, conversationId);
+                SELECT_OFFLOAD_SQL, String.class, conversationId, agentKey);
         return findUuidInRows(jsonList, uuid);
     }
 
@@ -256,19 +329,6 @@ public class SessionMessageStore {
         List<String> jsonList = jdbcTemplate.queryForList(
                 SELECT_OFFLOAD_BY_UUID_SQL, String.class, pattern);
         return findUuidInRows(jsonList, uuid);
-    }
-
-    private List<Message> filterPersistableMessages(List<Message> messages) {
-        if (messages == null || messages.isEmpty()) {
-            return List.of();
-        }
-        List<Message> persisted = new ArrayList<>(messages.size());
-        for (Message message : messages) {
-            if (!(message instanceof SystemMessage)) {
-                persisted.add(message);
-            }
-        }
-        return persisted;
     }
 
     private List<Message> findUuidInRows(List<String> jsonList, String uuid) {

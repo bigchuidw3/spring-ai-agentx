@@ -4,6 +4,8 @@
 
 > 当前发布版本：1.0.1-M2
 >
+> 开发中版本：1.0.2（多智能体：有状态子 Agent + 动态派生）
+>
 > 历史版本：1.0.1-M1 / 1.0.0-M2 / 1.0.0-M1
 >
 > JDK 21+ | Spring Boot 3.5.x | Spring AI 1.1.0
@@ -26,14 +28,14 @@ Spring AI AgentX 是一款面向 Java 开发者的 AI Agent 开发框架。框�
 | 同步与流式输出 | `call` / `stream` 双模式，流式基于 Reactor Flux，支持流式中途停止 |
 | 当前会话记忆 | `agentx_conversation` 记录每次调用边界；`agentx_session` 按 `original_messages`、`working_messages`、`offload_context` 三种状态键维护会话状态 |
 | 长期记忆 | 从 `original_messages` 异步抽取跨会话知识，写入外部 VectorStore；每次调用前按 `userId` 语义检索注入 system prompt |
-| 上下文压缩 | 参考 AgentScope 的 6 层渐进式压缩思路，并在其之上做了优化（详见下文与 [11-上下文压缩](docs/core/v1_1/11-上下文压缩.md)） |
+| 上下文压缩 | 6 层渐进式压缩策略：L1-L3 规则替换/offload（不调 LLM）、L4-L6 摘要（调 LLM），支持 `context_reload` 回溯原文（详见 [11-上下文压缩](docs/core/v1_1/11-上下文压缩.md)） |
 | 结构化输出 | `RunnableParams.outputType(...)` 按单次调用启用 JSON 输出，不影响同一会话中的普通对话 |
 | 工具调度与 MCP | 原生 Function Calling + MCP 协议，工具执行由框架统一接管；支持 ToolSearch 按需发现 |
 | 运行时参数注入 | `RunnableParams` 动态覆盖工具参数，精准控制工具行为 |
 | 任务管理与并发控制 | 会话级并发控制与中断机制，保障同一会话执行的有序性与可控性 |
 | Human-in-the-Loop | `askUser(true)` 默认注册内置 `ask_user` 工具与对应暂停拦截；支持审批类工具与输入类工具两种语义 |
 | 中断与恢复 | `agentx_pause_state` 持久化暂停快照，统一支持 `HITL_TOOL_REQUEST` 与 `USER_INTERRUPT` 两种暂停原因 |
-| SubAgent 子代理 | 子代理以 `call_{name}` 工具形式委派，拥有独立 context window；父 Agent 是 session 持久化边界 |
+| 多智能体 | 子 Agent 以 `call_{name}`（预定义）或 `spawn_subagent`（运行时派生）工具委派；子 Agent 按 `agent_key` 独立分区，具备跨调用多轮记忆、独立可观测性与广播中断/流式续跑 |
 | TraceAudit 追踪审计 | `agentx_trace` 统一 Span 模型（LLM / TOOL / COMPACT 一张表），记录每轮请求响应原文、工具入参出参、token 与耗时，全链路带 `user_id` |
 | TodoWrite 任务追踪 | 结构化任务列表工具，支持流式 TodoProgress 事件 |
 | Skills 技能体系 | 按需加载技能内容，减少大段提示词常驻上下文 |
@@ -89,23 +91,24 @@ M2 聚焦沙箱执行模型、可观测性数据隔离与 Trace 审计模型：
 
 沙箱与可观测性的从 0 到 1 使用教程、表结构升级命令见 [docs/core/v1_1_M2](docs/core/v1_1_M2)。
 
-## 关于上下文压缩相对 AgentScope 的优化
+## v1.0.2（开发中）相对 v1.0.1-M2 做了哪些调整
 
-AgentScope（ASJ）本身就提供了 6 层渐进式上下文压缩思路，框架在这套思路之上做了几点关键优化。这里只做简要说明，详细差异请看 [11-上下文压缩](docs/core/v1_1/11-上下文压缩.md)。
+v1.0.2 聚焦多智能体：把 SubAgent 从「无状态子代理」升级为「有状态子 Agent」，并新增运行时动态派生能力。
 
-### 1. L1 抛弃 LLM 调用，改为规则替换
+| 模块 | v1.0.1 口径 | v1.0.2 调整 |
+|------|-------------|-------------|
+| 子 Agent 会话持久化 | 子 Agent 关闭 session，父为唯一边界 | 子 Agent 按 `agent_key` 独立 `agentx_session` 分区，跨调用多轮记忆 |
+| 子 Agent 形态 | 仅预定义 `call_{name}` | 预定义 `call_{name}` + 动态派生 `spawn_subagent` |
+| 轨迹审计 | 复用父 TraceStore，无 agent 维度 | `agentx_trace` 带 `agent_key`，各 agent 独立还原执行序列 |
+| 中断恢复 | 不支持独立快照/恢复，由父统一承担 | 子 Agent 独立快照（children）+ 广播中断 + 流式续跑 |
+| 父子溯源 | 无 | `parent_session_id` / `parent_tool_call_id` 两列精确溯源 |
+| 入库时间 | 落库统一时刻 | `original_messages` 每条消息用生成时刻（线性时间） |
 
-AgentScope 的 L1（历史工具调用压缩）即使命中也要调一次 LLM 生成摘要，对于“连续工具消息”这种结构化极强的内容，开销和延迟都不划算。
+详细说明见 [docs/core/v1_2](docs/core/v1_2) 下的专题文档。
 
-v1.0.1 的 L1 改为：
+## 上下文压缩策略
 
-- 用字符串模板把连续工具消息替换成结构化清单
-- 原文按段整体 offload，保留 uuid 链路
-- 完全不调 LLM，毫秒级完成
-
-### 2. LLM 调用边界重新归类
-
-把 6 层策略按是否调 LLM 重新归类，调用方一眼能看清开销：
+框架内置 6 层渐进式上下文压缩，按是否调用 LLM 和处理的上下文区域划分，调用方一眼能看清开销：
 
 | 层级 | 是否调 LLM | 处理区 |
 |------|------------|--------|
@@ -116,19 +119,14 @@ v1.0.1 的 L1 改为：
 | L5 当前轮大消息摘要 | 是 | 当前任务区 |
 | L6 当前轮整体压缩 | 是 | 当前任务区 |
 
-也就是 **L1-L3 不调 LLM，L4-L6 调 LLM**；**L1-L2 处理历史区，L3-L4 跨界，L5-L6 处理当前任务区**。
+要点：
 
-### 3. 新增 `agentx_conversation` 表，调用边界不再需要自己算
+- **L1-L3 不调 LLM**（规则替换 / offload，毫秒级完成）；**L4-L6 调 LLM**（摘要）
+- **L1-L2 处理历史区，L3-L4 跨界，L5-L6 处理当前任务区**
+- L1 用字符串模板把连续工具消息替换成结构化清单，原文按段整体 offload，保留 uuid 链路
+- 每次调用开局写一行 `agentx_conversation`，终态回写状态 / token / 回答，调用边界无需再聚合
 
-AgentScope 只通过 sessions 持久化，调用方很难直接知道“哪几条 session 属于同一次调用”，得自己根据时间戳或会话状态去拼。
-
-v1.0.1 把调用边界独立成一张 `agentx_conversation` 表：
-
-- 每次 `call` / `stream` 一开局就写一行
-- 终态时把状态、token 用量、最终回答回写到同一行
-- `agentx_session` 只负责会话消息状态
-
-这样调用方查“我这一次调用到底发生了什么”非常直接，不用再做聚合。
+详细策略说明见 [11-上下文压缩](docs/core/v1_1/11-上下文压缩.md)。
 
 ## 快速开始
 
@@ -204,7 +202,7 @@ AgentResult result = agent.callForResult("帮我查一下北京天气，并给�
 | 文档 | 说明 |
 |------|------|
 | [05-分层记忆体系](docs/core/v1_1/05-分层记忆体系.md) | 当前会话记忆三态、长期记忆的抽取/合并/注入链路、`LongTermMemoryConfig` 配置 |
-| [11-上下文压缩](docs/core/v1_1/11-上下文压缩.md) | 6 层策略链、LLM 调用边界、历史区/当前任务区划分、AgentScope 优化点 |
+| [11-上下文压缩](docs/core/v1_1/11-上下文压缩.md) | 6 层策略链、LLM 调用边界、历史区/当前任务区划分 |
 | [13-结构化输出](docs/core/v1_1/13-结构化输出.md) | `outputType` 的 per-call 语义，以及它与会话持久化的关系 |
 | [18-SubAgent子代理](docs/core/v1_1/18-SubAgent子代理.md) | `call_{name}` 委派模型、父子会话边界和当前限制 |
 | [19-中断与恢复](docs/core/v1_1/19-中断与恢复.md) | PauseState 持久化、HITL/Interrupt 两种暂停语义与恢复规则 |
@@ -224,6 +222,15 @@ M2 调整功能的从 0 到 1 教程与升级指南，放在 [docs/core/v1_1_M2]
 | [02-可观测性](docs/core/v1_1_M2/02-可观测性.md) | 从 0 到 1 接入：六步接入（依赖 / yml / ChatModel / ReactAgent / 降噪 / userId）、自建审计三表与统一 Span 模型、按 user_id 隔离查询 |
 | [03-表结构变更与升级](docs/core/v1_1_M2/03-表结构变更与升级.md) | M1 → M2 全部表结构变更清单、两种升级方式（删表重建 / ALTER 增量）、完整可执行命令、老数据回填与校验 |
 | [04-上下文压缩与数据隔离](docs/core/v1_1_M2/04-上下文压缩与数据隔离.md) | 压缩链路全链 userId 透传（OffloadStore 接口变更与自定义实现迁移）、L3 层处理区语义澄清（最新工具调用边界） |
+
+## v1.0.2 文档（v1_2）
+
+多智能体相关专题，放在 [docs/core/v1_2](docs/core/v1_2) 下：
+
+| 文档 | 说明 |
+|------|------|
+| [01-表结构变更与字段调整](docs/core/v1_2/01-表结构变更与字段调整.md) | `agent_key` / 父子溯源列 + `created_at` 入库时间线性化 |
+| [02-多智能体](docs/core/v1_2/02-多智能体.md) | 预定义 / 动态派生两种模式、agentKey 身份规则、记忆续接语义、中断恢复、流式输出 |
 
 ## 其他专题文档（沿用 v1.0.0-M2）
 
@@ -263,6 +270,12 @@ M2 调整功能的从 0 到 1 教程与升级指南，放在 [docs/core/v1_1_M2]
 | `SandboxTest` / `DockerSandboxTest` | Local 与 Docker 两种沙箱模式的工具执行、快照恢复、隔离级别 |
 
 ## 版本路线图
+
+### v1.0.2（开发中）
+
+- 多智能体：有状态子 Agent（`agent_key` 分区 + 跨调用多轮记忆）
+- 动态派生子 Agent（`spawn_subagent`）
+- 子 Agent 广播中断与流式续跑
 
 ### v1.0.1-M2（当前发布版本）
 
@@ -314,8 +327,9 @@ M2 调整功能的从 0 到 1 教程与升级指南，放在 [docs/core/v1_1_M2]
 
 ### 规划中
 
-- Plan & Execute 架构
-- Agent Teams
+- 对接第三方长期记忆平台
+- RAG 增加关键词检索、混合检索功能
+- AgentX 可观测性 web 平台：类似 Opik / Langfuse，更专注 Agent 调用链，基于 `agentx_trace` 的完整父子结构做细节更全面的展示
 
 ## License
 

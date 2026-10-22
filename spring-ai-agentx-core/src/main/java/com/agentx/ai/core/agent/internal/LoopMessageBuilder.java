@@ -34,11 +34,12 @@ public class LoopMessageBuilder {
     private final DeferredToolRegistry deferredToolRegistry;
     private final boolean todoWriteEnabled;
     private final boolean enableSession;
+    private final String agentKey;
 
     public LoopMessageBuilder(String instructions, SessionMessageStore sessionMessageStore,
                               MemoryInjector memoryInjector, ThinkingMode thinkingMode,
                               DeferredToolRegistry deferredToolRegistry,
-                              boolean todoWriteEnabled, boolean enableSession) {
+                              boolean todoWriteEnabled, boolean enableSession, String agentKey) {
         this.instructions = instructions;
         this.sessionMessageStore = sessionMessageStore;
         this.memoryInjector = memoryInjector;
@@ -46,6 +47,7 @@ public class LoopMessageBuilder {
         this.deferredToolRegistry = deferredToolRegistry;
         this.todoWriteEnabled = todoWriteEnabled;
         this.enableSession = enableSession;
+        this.agentKey = agentKey != null ? agentKey : "master";
     }
 
     /**
@@ -79,9 +81,9 @@ public class LoopMessageBuilder {
         // 2. 历史消息链（优先 working_messages 压缩视图，回退 original_messages）
         String conversationId = params != null ? params.getConversationId() : null;
         if (enableSession && sessionMessageStore != null && conversationId != null) {
-            List<Message> history = sessionMessageStore.getMessages(conversationId, "working_messages");
+            List<Message> history = sessionMessageStore.getMessages(conversationId, agentKey, "working_messages");
             if (history.isEmpty()) {
-                history = sessionMessageStore.getMessages(conversationId, "original_messages");
+                history = sessionMessageStore.getMessages(conversationId, agentKey, "original_messages");
             }
             for (Message msg : history) {
                 if (!(msg instanceof SystemMessage)) {

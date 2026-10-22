@@ -6,7 +6,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import javax.sql.DataSource;
-import java.sql.Timestamp;
+import java.time.LocalDateTime;
 
 /**
  * Trace 审计存储层（MySQL 专用）— 统一 Span 模型。
@@ -59,6 +59,8 @@ public class TraceStore {
                 session_id        BIGINT       NOT NULL  COMMENT '会话记录ID（agentx_session.id）',
                 conversation_id   VARCHAR(100) NOT NULL  COMMENT '会话ID',
                 user_id           VARCHAR(100) DEFAULT NULL COMMENT '用户ID',
+                agent_key         VARCHAR(100) NOT NULL DEFAULT 'master' COMMENT '消息归属：master / 子agent名',
+                parent_tool_call_id VARCHAR(100) DEFAULT NULL COMMENT '派生出本subagent调用的ToolCall id',
                 round             INT          NOT NULL  COMMENT '本轮ReAct循环轮次；工具Span为发起调用的LLM轮次',
                 span_type         VARCHAR(8)   NOT NULL DEFAULT 'LLM' COMMENT 'Span类型：LLM模型调用 | TOOL工具执行',
                 tool_name         VARCHAR(128) DEFAULT NULL COMMENT '工具名（仅TOOL）',
@@ -86,27 +88,27 @@ public class TraceStore {
             """;
 
     private static final String INSERT_LLM_SQL = """
-            INSERT INTO agentx_trace (id, session_id, conversation_id, user_id, round,
+            INSERT INTO agentx_trace (id, session_id, conversation_id, user_id, agent_key, parent_tool_call_id, round,
                 span_type, tool_name, tool_call_id,
                 input_data, output_data, think,
                 prompt_tokens, completion_tokens, duration_ms, success, error_message, created_at, compact_id)
-            VALUES (?, ?, ?, ?, ?, 'LLM', NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'LLM', NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """;
 
     private static final String INSERT_TOOL_SQL = """
-            INSERT INTO agentx_trace (id, session_id, conversation_id, user_id, round,
+            INSERT INTO agentx_trace (id, session_id, conversation_id, user_id, agent_key, parent_tool_call_id, round,
                 span_type, tool_name, tool_call_id,
                 input_data, output_data, think,
                 prompt_tokens, completion_tokens, duration_ms, success, error_message, created_at)
-            VALUES (?, ?, ?, ?, ?, 'TOOL', ?, ?, ?, ?, NULL, 0, 0, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'TOOL', ?, ?, ?, ?, NULL, 0, 0, ?, ?, ?, ?)
             """;
 
     private static final String INSERT_COMPACT_SQL = """
-            INSERT INTO agentx_trace (id, session_id, conversation_id, user_id, round,
+            INSERT INTO agentx_trace (id, session_id, conversation_id, user_id, agent_key, parent_tool_call_id, round,
                 span_type, tool_name, tool_call_id,
                 input_data, output_data, think,
                 prompt_tokens, completion_tokens, duration_ms, success, error_message, created_at, compact_id)
-            VALUES (?, ?, ?, ?, ?, 'COMPACT', ?, NULL, NULL, ?, NULL, 0, 0, ?, 1, NULL, ?, NULL)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'COMPACT', ?, NULL, NULL, ?, NULL, 0, 0, ?, 1, NULL, ?, NULL)
             """;
 
     private static final String COUNT_TOOLS_SQL = """
@@ -152,15 +154,16 @@ public class TraceStore {
      *
      * @param eventTime 事件发生时刻（由调用方捕获，而非入库时刻）
      */
-    public void save(long sessionId, String conversationId, String userId, int round,
+    public void save(long sessionId, String conversationId, String userId, String agentKey,
+                     String parentToolCallId, int round,
                      String inputData, String outputData, String think,
                      int promptTokens, int completionTokens,
-                     long durationMs, boolean success, String errorMessage, Timestamp eventTime,
+                     long durationMs, boolean success, String errorMessage, LocalDateTime eventTime,
                      Long compactId) {
         try {
             // success 传 int 而非 boolean：SMALLINT 列在 PG/GaussDB 上 setBoolean 会抛类型错误
             jdbcTemplate.update(INSERT_LLM_SQL,
-                    IdWorker.getId(), sessionId, conversationId, userId, round,
+                    IdWorker.getId(), sessionId, conversationId, userId, agentKey, parentToolCallId, round,
                     inputData, outputData, think,
                     promptTokens, completionTokens, durationMs,
                     success ? 1 : 0, errorMessage, eventTime, compactId);
@@ -176,13 +179,14 @@ public class TraceStore {
      * @param round     发起该工具调用的 LLM 轮次
      * @param eventTime 事件发生时刻（由调用方捕获）
      */
-    public void saveTool(long sessionId, String conversationId, String userId, int round,
+    public void saveTool(long sessionId, String conversationId, String userId, String agentKey,
+                         String parentToolCallId, int round,
                          String toolName, String toolCallId,
                          String arguments, String result,
-                         boolean success, long durationMs, String errorMessage, Timestamp eventTime) {
+                         boolean success, long durationMs, String errorMessage, LocalDateTime eventTime) {
         try {
             jdbcTemplate.update(INSERT_TOOL_SQL,
-                    IdWorker.getId(), sessionId, conversationId, userId, round,
+                    IdWorker.getId(), sessionId, conversationId, userId, agentKey, parentToolCallId, round,
                     toolName, toolCallId,
                     arguments, result,
                     durationMs,
@@ -199,13 +203,14 @@ public class TraceStore {
      * @param strategy    压缩策略名（L1-L6）
      * @param summaryJson 压缩详情 JSON（前后 token/消息数等）
      */
-    public long saveCompaction(long sessionId, String conversationId, String userId, int round,
+    public long saveCompaction(long sessionId, String conversationId, String userId, String agentKey,
+                               String parentToolCallId, int round,
                                String strategy, String summaryJson,
-                               long durationMs, Timestamp eventTime) {
+                               long durationMs, LocalDateTime eventTime) {
         long id = IdWorker.getId();
         try {
             jdbcTemplate.update(INSERT_COMPACT_SQL,
-                    id, sessionId, conversationId, userId, round,
+                    id, sessionId, conversationId, userId, agentKey, parentToolCallId, round,
                     strategy, summaryJson,
                     durationMs, eventTime);
         } catch (Exception e) {

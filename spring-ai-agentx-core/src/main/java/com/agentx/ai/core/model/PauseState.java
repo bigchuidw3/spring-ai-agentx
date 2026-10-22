@@ -72,6 +72,14 @@ public class PauseState {
      * 中断时正在执行的 SubAgent 引用列表（仅 USER_INTERRUPT 且含 SubAgent 时有效）
      */
     private final List<PauseState> children;
+    /**
+     * 快照归属：null 表示 master，非 null 表示子 agent 名。
+     */
+    private final String agentKey;
+    /**
+     * 子 agent 由哪个工具调用派生（对回 master 的 pendingToolCalls）。master 为 null。
+     */
+    private final String parentToolCallId;
 
     private PauseState(Builder builder) {
         this.messages = builder.messages;
@@ -87,6 +95,8 @@ public class PauseState {
         this.interruptMessage = builder.interruptMessage;
         this.interruptedAt = builder.interruptedAt;
         this.children = builder.children;
+        this.agentKey = builder.agentKey;
+        this.parentToolCallId = builder.parentToolCallId;
     }
 
     public List<Message> getMessages() {
@@ -156,8 +166,45 @@ public class PauseState {
         return children;
     }
 
+    /**
+     * 快照归属：null = master，非 null = 子 agent 名。
+     */
+    public String getAgentKey() {
+        return agentKey;
+    }
+
+    /**
+     * 子 agent 由哪个工具调用派生。master 为 null。
+     */
+    public String getParentToolCallId() {
+        return parentToolCallId;
+    }
+
     public static Builder builder() {
         return new Builder();
+    }
+
+    /**
+     * 复制一份并替换 children（master 收集子 agent 快照时使用）。
+     */
+    public PauseState withChildren(List<PauseState> children) {
+        return builder()
+                .messages(this.messages)
+                .currentRound(this.currentRound)
+                .pendingToolCalls(this.pendingToolCalls)
+                .params(this.params)
+                .query(this.query)
+                .sessionId(this.sessionId)
+                .totalPromptTokens(this.totalPromptTokens)
+                .totalCompletionTokens(this.totalCompletionTokens)
+                .reason(this.reason)
+                .safePoint(this.safePoint)
+                .interruptMessage(this.interruptMessage)
+                .interruptedAt(this.interruptedAt)
+                .children(children)
+                .agentKey(this.agentKey)
+                .parentToolCallId(this.parentToolCallId)
+                .build();
     }
 
     public static class Builder {
@@ -174,6 +221,8 @@ public class PauseState {
         private String interruptMessage;
         private long interruptedAt;
         private List<PauseState> children;
+        private String agentKey;
+        private String parentToolCallId;
 
         public Builder messages(List<Message> messages) {
             this.messages = messages;
@@ -237,6 +286,16 @@ public class PauseState {
 
         public Builder children(List<PauseState> children) {
             this.children = children;
+            return this;
+        }
+
+        public Builder agentKey(String agentKey) {
+            this.agentKey = agentKey;
+            return this;
+        }
+
+        public Builder parentToolCallId(String parentToolCallId) {
+            this.parentToolCallId = parentToolCallId;
             return this;
         }
 

@@ -134,10 +134,15 @@ public class TracingHook implements AgentHook {
         if (ctx.getTracingState() != null) {
             return null; // resume 重入时已有根 span，不重复开启
         }
-        String conversationId = ctx.getConversationId() != null ? ctx.getConversationId() : "unknown";
-        Span span = tracer.nextSpan().name(SPAN_AGENT_PREFIX + conversationId);
+        String agentKey = ctx.getAgentKey();
+        // master 用 conversationId，子 Agent 用 agentKey 命名根 span（避免与 master 同名、无法区分）
+        String spanName = (agentKey == null || "master".equals(agentKey))
+                ? SPAN_AGENT_PREFIX + (ctx.getConversationId() != null ? ctx.getConversationId() : "unknown")
+                : SPAN_AGENT_PREFIX + agentKey;
+        Span span = tracer.nextSpan().name(spanName);
         tagIfPresent(span, ChatContentObservationHandler.KEY_INPUT_VALUE, ctx.getQuery());
         tagIfPresent(span, OPIK_METADATA_PREFIX + "conversationId", ctx.getConversationId());
+        tagIfPresent(span, OPIK_METADATA_PREFIX + "agentKey", agentKey);
         tagIfPresent(span, OPIK_METADATA_PREFIX + "userId", ctx.getUserId());
         if (ctx.getSessionId() > 0) {
             span.tag(OPIK_METADATA_PREFIX + "sessionId", Long.toString(ctx.getSessionId()));

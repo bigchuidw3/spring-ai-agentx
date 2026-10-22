@@ -18,6 +18,7 @@ import com.agentx.ai.core.advisors.PauseAdvisor;
 import com.agentx.ai.core.advisors.RequestLoggingAdvisor;
 import com.agentx.ai.core.agent.internal.AgentLoopExecutor;
 import com.agentx.ai.core.agent.internal.AgentTaskManager;
+import com.agentx.ai.core.agent.internal.SubAgentInterruptRegistry;
 import com.agentx.ai.core.interrupt.PauseStateStore;
 import com.agentx.ai.core.interrupt.InMemoryPauseStateStore;
 import com.agentx.ai.core.interrupt.PauseReason;
@@ -32,6 +33,7 @@ import com.agentx.ai.core.memory.LongTermMemoryManager;
 import com.agentx.ai.core.memory.store.DataSourceStorageFactory;
 import com.agentx.ai.core.memory.store.SessionMessageStore;
 import com.agentx.ai.core.memory.store.ConversationStore;
+import com.agentx.ai.core.observability.TracingHook;
 import com.agentx.ai.core.sandbox.*;
 import com.agentx.ai.core.sandbox.snapshot.InMemorySnapshotMetadataStore;
 import com.agentx.ai.core.sandbox.snapshot.JdbcSnapshotMetadataStore;
@@ -48,6 +50,7 @@ import com.agentx.ai.core.tools.toolsearch.ToolSearchConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import io.micrometer.observation.ObservationRegistry;
+import io.micrometer.tracing.Tracer;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.api.Advisor;
 import org.springframework.ai.chat.model.ChatModel;
@@ -58,9 +61,11 @@ import reactor.core.publisher.Flux;
 
 import javax.sql.DataSource;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.function.Supplier;
 
 /**
@@ -87,11 +92,17 @@ public class ReactAgent {
     private final List<Advisor> advisors;
     private final AgentTaskManager taskManager;
     private final String instructions;
-    private final SessionMessageStore sessionMessageStore;
+    private SessionMessageStore sessionMessageStore;
     private final ConversationStore conversationStore;
     private final LongTermMemoryManager longTermMemoryManager;
     private final DataSource dataSource;
     private boolean enableSession;
+    /** 消息分区归属：master 或子 agent 名。 */
+    private String agentKey = "master";
+    /** 父调用 session_id（派生本 subagent 的 master 调用）。 */
+    private String parentSessionId;
+    /** 父调用 toolCall id（派生本 subagent 的工具调用）。 */
+    private String parentToolCallId;
     private final List<AgentHook> hooks;
     private final ThinkingMode thinkingMode;
     private final int maxRetries;
@@ -102,6 +113,8 @@ public class ReactAgent {
     private TraceStore traceStore;
     private final boolean enableTrace;
     private final ObservationRegistry observationRegistry;
+    /** 父 Agent 透传的 Tracer：子 Agent 未显式配置 TracingHook 时，自动产出可观测性 span。 */
+    private Tracer tracer;
 
     /**
      * Agent 暂停状态存储。默认内存实现，可通过 {@link Builder#stateStore(PauseStateStore)} 自定义。
@@ -148,6 +161,7 @@ public class ReactAgent {
         this.chatClient = clientBuilder.build();
         this.name = builder.name;
         this.description = builder.description;
+        this.agentKey = builder.agentKey;
         this.chatModel = builder.chatModel;
         this.maxRounds = builder.maxRounds;
         this.tools = List.copyOf(builder.tools);
@@ -169,6 +183,7 @@ public class ReactAgent {
         this.enableTrace = builder.enableTrace;
         this.stateStore = stateStore;
         this.observationRegistry = builder.observationRegistry;
+        this.tracer = builder.tracer;
     }
 
     private static SandboxManager buildSandboxManager(Builder builder) {
@@ -229,7 +244,7 @@ public class ReactAgent {
 
         // offloadStore：会话启用时构建，供上下文压缩 offload + 工具结果源头卸载共用
         OffloadStore offloadStore = (enableSession && sessionMessageStore != null)
-                ? new SessionBackedOffloadStore(sessionMessageStore)
+                ? new SessionBackedOffloadStore(sessionMessageStore, agentKey)
                 : new NoOpOffloadStore();
 
         var executorBuilder = AgentLoopExecutor.builder()
@@ -243,6 +258,9 @@ public class ReactAgent {
                 .chatModel(chatModel)
                 .longTermMemoryManager(longTermMemoryManager)
                 .enableSession(enableSession)
+                .agentKey(agentKey)
+                .parentSessionId(parentSessionId)
+                .parentToolCallId(parentToolCallId)
                 .enableTrace(enableTrace)
                 .askUserToolName(askUserToolName)
                 .thinkingMode(thinkingMode)
@@ -266,7 +284,7 @@ public class ReactAgent {
             ContextCompactor compactor = new ContextCompactor(
                     this.contextPolicy, this.chatModel,
                     offloadStore, sessionMessageStore,
-                    chain, summarizer);
+                    chain, summarizer, this.agentKey, this.tracer);
             // 压缩 Hook 置列表首部（priority=Integer.MAX_VALUE 已确保最先执行）
             allHooks.add(0, new ContextCompactionHook(compactor));
         }
@@ -274,6 +292,11 @@ public class ReactAgent {
         // 沙箱（可选，按需引入 SandboxHook）
         if (this.sandboxManager != null) {
             allHooks.add(new com.agentx.ai.core.hook.SandboxHook(this.sandboxManager));
+        }
+
+        // 子 Agent 未显式配置 TracingHook 时，复用父的 Tracer 自动产出可观测性 span
+        if (this.tracer != null && allHooks.stream().noneMatch(h -> h instanceof TracingHook)) {
+            allHooks.add(new TracingHook(this.tracer));
         }
 
         executorBuilder.hooks(allHooks);
@@ -416,7 +439,10 @@ public class ReactAgent {
         if (taskManager == null) {
             return false;
         }
-        return taskManager.stopTask(conversationId);
+        // 先停 master（移除任务，使子 Agent 完成回调不再调度新轮），再广播停止子 Agent
+        boolean stopped = taskManager.stopTask(conversationId);
+        SubAgentInterruptRegistry.stopAll(conversationId);
+        return stopped;
     }
 
     // ==================== 用户主动中断与恢复 ====================
@@ -440,11 +466,7 @@ public class ReactAgent {
         if (taskManager == null) {
             return false;
         }
-        boolean triggered = taskManager.interrupt(conversationId, message);
-
-        // interrupt 回调内已发射 Paused 事件；这里同步捕获 PauseState 并持久化
-        // 实际的持久化由 AgentLoopExecutor 在中断回调里通过 storeState 桥接完成
-        return triggered;
+        return taskManager.interrupt(conversationId, message);
     }
 
     /**
@@ -563,17 +585,30 @@ public class ReactAgent {
     }
 
     /**
-     * 配置为 SubAgent 模式（由父 Agent 的 build() 在 wrap supplier 中调用）。
-     * <p>
-     * - 禁用 session：不记录 agentx_session<br>
-     * - 注入父 TraceStore：复用父 Agent 的 trace 审计（受父 enableTrace 控制，null 则不记录）<br>
-     * - 长期记忆天然无：SubAgent 不持有 LongTermMemoryManager
-     * <p>
-     * createExecutor() 每次调用时读取这些字段，因此构建后设置即可生效。
+     * 配置为子 Agent：parent store 非 null 时复用，agentKey 默认取 name（调用方已显式指定则保留）。
      */
-    void configureAsSubAgent(TraceStore parentTraceStore) {
-        this.enableSession = false;
-        this.traceStore = parentTraceStore;
+    public void configureAsSubAgent(TraceStore parentTraceStore, SessionMessageStore parentSessionMessageStore,
+                                    Tracer parentTracer) {
+        if (parentTraceStore != null) {
+            this.traceStore = parentTraceStore;
+        }
+        if (parentSessionMessageStore != null) {
+            this.sessionMessageStore = parentSessionMessageStore;
+        }
+        if (parentTracer != null) {
+            this.tracer = parentTracer;
+        }
+        if (this.agentKey == null || "master".equals(this.agentKey)) {
+            this.agentKey = this.name;
+        }
+    }
+
+    /**
+     * 设置父调用溯源（master 的 session_id 与派生本 subagent 的 toolCall id）。由 SubAgentTool 在委派前调用。
+     */
+    public void configureSubAgentParent(String parentSessionId, String parentToolCallId) {
+        this.parentSessionId = parentSessionId;
+        this.parentToolCallId = parentToolCallId;
     }
 
     public ChatClient getChatClient() {
@@ -622,6 +657,7 @@ public class ReactAgent {
     public static class Builder {
         private String name;
         private String description;
+        private String agentKey = "master";
         private ChatModel chatModel;
         private final List<ToolCallback> tools = new ArrayList<>();
         private final List<Advisor> advisors = new ArrayList<>();
@@ -640,6 +676,7 @@ public class ReactAgent {
         private DeferredToolRegistry deferredToolRegistry;
         private boolean enableTrace = true;
         private ObservationRegistry observationRegistry;
+        private Tracer tracer;
         private PauseStateStore stateStore;
         private final List<Supplier<ReactAgent>> subAgentProviders = new ArrayList<>();
 
@@ -648,8 +685,21 @@ public class ReactAgent {
             return this;
         }
 
+        public String getName() {
+            return name;
+        }
+
         public Builder description(String description) {
             this.description = description;
+            return this;
+        }
+
+        /**
+         * 设置 agent 归属标识（agent_key）。master 为默认值，动态派生的子 Agent 用此区分
+         * trace/session 分区。通常无需手动设置，预定义子 Agent 会由 build() 自动注入。
+         */
+        public Builder agentKey(String agentKey) {
+            this.agentKey = agentKey;
             return this;
         }
 
@@ -665,6 +715,11 @@ public class ReactAgent {
          */
         public Builder observationRegistry(ObservationRegistry observationRegistry) {
             this.observationRegistry = observationRegistry;
+            return this;
+        }
+
+        public Builder tracer(Tracer tracer) {
+            this.tracer = tracer;
             return this;
         }
 
@@ -709,6 +764,10 @@ public class ReactAgent {
         public Builder instructions(String instructions) {
             this.instructions = instructions;
             return this;
+        }
+
+        public String getInstructions() {
+            return instructions;
         }
 
         /**
@@ -1077,9 +1136,11 @@ public class ReactAgent {
 
             // 处理 SubAgent：调一次 supplier 提取 name/description，注册为工具
             // wrap supplier：每次创建子 Agent 后自动配置为 SubAgent 模式
-            // - 禁用 session（不记录 agentx_session）
+            // - 注入父 SessionMessageStore（复用同一张 agentx_session，按 agent_key 分区）
             // - 注入父 TraceStore（受父 enableTrace 控制，要开一起开）
             final TraceStore subAgentTraceStore = this.enableTrace ? traceStore : null;
+            final SessionMessageStore parentSessionMessageStore = sessionMessageStore;
+            Set<String> seenSubAgentNames = new HashSet<>();
             for (Supplier<ReactAgent> provider : subAgentProviders) {
                 ReactAgent prototype = provider.get();
                 String agentName = prototype.getName();
@@ -1087,12 +1148,22 @@ public class ReactAgent {
                 if (agentName == null || agentName.isBlank()) {
                     throw new IllegalArgumentException("SubAgent 必须设置 name");
                 }
+                if (!seenSubAgentNames.add(agentName)) {
+                    throw new IllegalArgumentException("SubAgent 名称重复: " + agentName);
+                }
                 Supplier<ReactAgent> wrappedProvider = () -> {
                     ReactAgent agent = provider.get();
-                    agent.configureAsSubAgent(subAgentTraceStore);
+                    agent.configureAsSubAgent(subAgentTraceStore, parentSessionMessageStore, this.tracer);
                     return agent;
                 };
-                tools.add(new SubAgentTool.SubAgentToolCallback(agentName, agentDesc, wrappedProvider));
+                tools.add(SubAgentTool.create(agentName, agentDesc, wrappedProvider));
+            }
+
+            // 动态派生的子 Agent 工具（spawn_subagent）注入父 Tracer，复用产出可观测性
+            for (ToolCallback tool : tools) {
+                if (tool instanceof SubAgentTool.SubAgentToolCallback callback) {
+                    callback.configureParentTracer(this.tracer);
+                }
             }
 
             return new ReactAgent(this, sessionMessageStore, conversationStore,

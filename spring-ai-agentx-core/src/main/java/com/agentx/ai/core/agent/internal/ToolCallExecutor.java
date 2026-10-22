@@ -5,6 +5,7 @@ import com.agentx.ai.core.hook.HookManager;
 import com.agentx.ai.core.hook.AfterToolExecutionEvent;
 import com.agentx.ai.core.hook.BeforeToolExecutionEvent;
 import com.agentx.ai.core.model.AgentStreamEvent;
+import com.agentx.ai.core.model.PauseState;
 import com.agentx.ai.core.model.PendingToolCall;
 import com.agentx.ai.core.model.RunnableParams;
 import com.agentx.ai.core.prompt.PromptConstants;
@@ -94,6 +95,13 @@ public class ToolCallExecutor {
     public ToolExecutionResult executeSingleTool(AssistantMessage.ToolCall toolCall, RunnableParams params,
                                                   Sinks.Many<AgentStreamEvent> sink,
                                                   AgentRuntimeContext runtimeCtx) {
+        return executeSingleTool(toolCall, params, sink, runtimeCtx, null);
+    }
+
+    public ToolExecutionResult executeSingleTool(AssistantMessage.ToolCall toolCall, RunnableParams params,
+                                                  Sinks.Many<AgentStreamEvent> sink,
+                                                  AgentRuntimeContext runtimeCtx,
+                                                  PauseState childSnapshot) {
         String toolName = toolCall.name();
         String argsJson = toolCall.arguments();
         long toolStart = System.currentTimeMillis();
@@ -120,7 +128,7 @@ public class ToolCallExecutor {
         Object result;
         String effectiveArgs = argsJson;
         try {
-            ToolContext toolContext = buildToolContext(params, sink, runtimeCtx);
+            ToolContext toolContext = buildToolContext(params, sink, runtimeCtx, toolCall.id(), childSnapshot);
 
             if (runtimeCtx != null && !hookManager.isEmpty()) {
                 BeforeToolExecutionEvent event = new BeforeToolExecutionEvent(
@@ -255,6 +263,19 @@ public class ToolCallExecutor {
                                       RunnableParams params,
                                       AgentRuntimeContext runtimeCtx,
                                       Runnable onComplete) {
+        executeToolCallsAsync(sink, toolCalls, null, messages, params, runtimeCtx, onComplete);
+    }
+
+    /**
+     * 异步执行工具调用（保证顺序），支持按 toolCallId 携带子 Agent 快照（恢复续跑时使用）。
+     */
+    public void executeToolCallsAsync(Sinks.Many<AgentStreamEvent> sink,
+                                      List<AssistantMessage.ToolCall> toolCalls,
+                                      Map<String, PauseState> childSnapshots,
+                                      List<Message> messages,
+                                      RunnableParams params,
+                                      AgentRuntimeContext runtimeCtx,
+                                      Runnable onComplete) {
         int total = toolCalls.size();
         AtomicInteger completedCount = new AtomicInteger(0);
         List<List<Message>> results = new ArrayList<>(total);
@@ -269,7 +290,8 @@ public class ToolCallExecutor {
             Schedulers.boundedElastic().schedule(() -> {
                 long toolStart = System.currentTimeMillis();
                 try {
-                    ToolExecutionResult toolResult = executeSingleTool(tc, params, sink, runtimeCtx);
+                    PauseState child = childSnapshots != null ? childSnapshots.get(tc.id()) : null;
+                    ToolExecutionResult toolResult = executeSingleTool(tc, params, sink, runtimeCtx, child);
                     results.set(index, collectToolCallMessages(tc, toolResult));
                     execDetails.set(index, new ToolExecDetail(tc, toolResult.rawResult(), null,
                             System.currentTimeMillis() - toolStart));
@@ -521,7 +543,8 @@ public class ToolCallExecutor {
     // ==================== 辅助方法 ====================
 
     private ToolContext buildToolContext(RunnableParams params, Sinks.Many<AgentStreamEvent> sink,
-                                          AgentRuntimeContext runtimeCtx) {
+                                          AgentRuntimeContext runtimeCtx, String toolCallId,
+                                          PauseState childSnapshot) {
         Map<String, Object> context = new HashMap<>();
         if (params != null) {
             if (params.getUserId() != null) {
@@ -536,6 +559,9 @@ public class ToolCallExecutor {
             context.put("eventSink", sink);
         }
         if (runtimeCtx != null) {
+            if (runtimeCtx.getSessionId() > 0) {
+                context.put("parentSessionId", String.valueOf(runtimeCtx.getSessionId()));
+            }
             if (runtimeCtx.getExecutionBackend() != null) {
                 context.put(com.agentx.ai.core.sandbox.SandboxToolContexts.EXECUTION_BACKEND_KEY,
                         runtimeCtx.getExecutionBackend());
@@ -544,6 +570,12 @@ public class ToolCallExecutor {
                 context.put(com.agentx.ai.core.sandbox.SandboxToolContexts.EXECUTION_BACKEND_KEY,
                         com.agentx.ai.core.sandbox.UnavailableExecutionBackend.INSTANCE);
             }
+        }
+        if (toolCallId != null) {
+            context.put("parentToolCallId", toolCallId);
+        }
+        if (childSnapshot != null) {
+            context.put("subAgentChildSnapshot", childSnapshot);
         }
         return new ToolContext(context);
     }

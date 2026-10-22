@@ -341,8 +341,8 @@ public final class PromptConstants {
             你拥有 TodoWrite 工具用于管理任务列表。执行多步骤任务时必须遵守以下规则：
             1. 收到多步骤任务后，必须先调用 TodoWrite 创建任务列表（全部 pending），然后再执行任何实际操作
             2. 每开始一个任务前，必须先调用 TodoWrite 将其标记为 in_progress
-            3. 每完成一个任务后，必须立即调用 TodoWrite 将其标记为 completed，然后才能开始下一个任务
-            4. 禁止在执行完多个任务后才批量更新状态，必须逐个更新
+            3. 每完成一个任务后，必须及时调用 TodoWrite 将其标记为 completed
+            4. 允许多个任务并发 in_progress（例如并发派生多个子 Agent 处理不同子任务）
             5. 调用 TodoWrite 时不要同时输出最终答案，等所有任务标记 completed 后再统一输出完整答案
             """;
 }

@@ -17,7 +17,9 @@ import org.springframework.ai.chat.messages.Message;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import javax.sql.DataSource;
-import java.sql.Timestamp;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -40,8 +42,8 @@ import java.util.Map;
  *     reason            VARCHAR(50)  NOT NULL                 COMMENT '暂停原因',
  *     safe_point        VARCHAR(50)  DEFAULT NULL             COMMENT '中断安全点',
  *     current_round     INT          NOT NULL                 COMMENT '中断时已完成的轮次',
- *     interrupted_at    TIMESTAMP    NOT NULL                 COMMENT '中断时间',
- *     expires_at        TIMESTAMP    DEFAULT NULL             COMMENT '过期时间',
+ *     interrupted_at    TIMESTAMP(3) NOT NULL                 COMMENT '中断时间',
+ *     expires_at        TIMESTAMP(3) DEFAULT NULL             COMMENT '过期时间',
  *     snapshot_json     LONGTEXT     NOT NULL                 COMMENT '完整 PauseState JSON',
  *     PRIMARY KEY (id),
  *     UNIQUE KEY uk_conversation_id (conversation_id),
@@ -62,8 +64,8 @@ public class JdbcPauseStateStore implements PauseStateStore {
                 reason            VARCHAR(50)  NOT NULL                 COMMENT '暂停原因',
                 safe_point        VARCHAR(50)  DEFAULT NULL             COMMENT '中断安全点',
                 current_round     INT          NOT NULL                 COMMENT '中断时已完成的轮次',
-                interrupted_at    TIMESTAMP    NOT NULL                 COMMENT '中断时间',
-                expires_at        TIMESTAMP    DEFAULT NULL             COMMENT '过期时间',
+                interrupted_at    TIMESTAMP(3) NOT NULL                 COMMENT '中断时间',
+                expires_at        TIMESTAMP(3) DEFAULT NULL             COMMENT '过期时间',
                 snapshot_json     LONGTEXT     NOT NULL                 COMMENT '完整 PauseState JSON',
                 PRIMARY KEY (id),
                 UNIQUE KEY uk_conversation_id (conversation_id),
@@ -144,11 +146,11 @@ public class JdbcPauseStateStore implements PauseStateStore {
             String safePoint = state.getSafePoint() != null ? state.getSafePoint().name() : null;
             long interruptedAt = state.getInterruptedAt() > 0
                     ? state.getInterruptedAt() : System.currentTimeMillis();
-            Timestamp expiresAt = new Timestamp(interruptedAt + ttlMillis);
+            LocalDateTime expiresAt = toLocalDateTime(interruptedAt + ttlMillis);
 
             jdbcTemplate.update(UPSERT_SQL,
                     conversationId, reason, safePoint, state.getCurrentRound(),
-                    new Timestamp(interruptedAt), expiresAt, json);
+                    toLocalDateTime(interruptedAt), expiresAt, json);
             log.debug("[JdbcPauseStateStore] saved convId={} reason={}", conversationId, reason);
         } catch (Exception e) {
             log.error("[JdbcPauseStateStore] save failed: convId={}", conversationId, e);
@@ -222,6 +224,8 @@ public class JdbcPauseStateStore implements PauseStateStore {
         if (state.getSafePoint() != null) m.put("safePoint", state.getSafePoint().name());
         m.put("interruptMessage", state.getInterruptMessage());
         m.put("interruptedAt", state.getInterruptedAt());
+        if (state.getAgentKey() != null) m.put("agentKey", state.getAgentKey());
+        if (state.getParentToolCallId() != null) m.put("parentToolCallId", state.getParentToolCallId());
         if (state.getChildren() != null && !state.getChildren().isEmpty()) {
             List<Map<String, Object>> childrenList = new ArrayList<>();
             for (PauseState child : state.getChildren()) {
@@ -253,6 +257,13 @@ public class JdbcPauseStateStore implements PauseStateStore {
                 .totalCompletionTokens(longVal(m, "totalCompletionTokens"))
                 .interruptMessage(strVal(m, "interruptMessage"))
                 .interruptedAt(longVal(m, "interruptedAt"));
+
+        if (strVal(m, "agentKey") != null) {
+            b.agentKey(strVal(m, "agentKey"));
+        }
+        if (strVal(m, "parentToolCallId") != null) {
+            b.parentToolCallId(strVal(m, "parentToolCallId"));
+        }
 
         // 枚举
         String reasonStr = strVal(m, "reason");
@@ -300,6 +311,10 @@ public class JdbcPauseStateStore implements PauseStateStore {
 
     private void ensureInitialized() {
         if (!initialized) initialize();
+    }
+
+    private static LocalDateTime toLocalDateTime(long epochMillis) {
+        return LocalDateTime.ofInstant(Instant.ofEpochMilli(epochMillis), ZoneId.systemDefault());
     }
 
     private static String requireConversationId(PauseState state) {

@@ -2,11 +2,14 @@ package com.agentx.ai.core.stage;
 
 import com.agentx.ai.core.model.AgentStreamEvent;
 import com.agentx.ai.core.model.RunnableParams;
+import com.agentx.ai.core.model.TimedMessage;
 import com.agentx.ai.core.sandbox.ExecutionBackend;
 import com.agentx.ai.core.sandbox.Sandbox;
 import com.agentx.ai.core.trace.TraceManager;
 import org.springframework.ai.chat.messages.Message;
 
+import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -28,6 +31,8 @@ public class AgentRuntimeContext {
 
     private TraceManager traceManager;
     private long sessionId;
+    /** 消息分区归属：master / 子 agent 名。 */
+    private volatile String agentKey;
 
     /**
      * 可观测性状态（由 TracingHook 写入，类型为 Object 以避免核心上下文类
@@ -52,7 +57,7 @@ public class AgentRuntimeContext {
     private volatile String modelName;
 
     private volatile int newMsgStartIndex;
-    private volatile List<Message> originalMessagesSnapshot;
+    private volatile List<TimedMessage> originalMessagesSnapshot;
     private final AtomicReference<String> terminalStatus = new AtomicReference<>(null);
     /**
      * 终态落库幂等标志。CAS true 一次后，后续 persistOnTerminal 调用直接返回，
@@ -133,6 +138,14 @@ public class AgentRuntimeContext {
         this.sessionId = sessionId;
     }
 
+    public String getAgentKey() {
+        return agentKey;
+    }
+
+    public void setAgentKey(String agentKey) {
+        this.agentKey = agentKey;
+    }
+
     /**
      * 本次调用新增消息在 messages 列表中的起点，终态落库时据此切片。
      */
@@ -144,26 +157,33 @@ public class AgentRuntimeContext {
         this.newMsgStartIndex = newMsgStartIndex;
     }
 
-    public List<Message> getOriginalMessagesSnapshot() {
+    public List<TimedMessage> getOriginalMessagesSnapshot() {
         return originalMessagesSnapshot;
     }
 
     public void setOriginalMessagesSnapshot(List<Message> originalMessagesSnapshot) {
-        this.originalMessagesSnapshot = originalMessagesSnapshot;
+        LocalDateTime now = LocalDateTime.now();
+        this.originalMessagesSnapshot = new ArrayList<>(originalMessagesSnapshot.size());
+        for (Message message : originalMessagesSnapshot) {
+            this.originalMessagesSnapshot.add(new TimedMessage(message, now));
+        }
     }
 
     public void appendOriginalMessage(Message message) {
         if (message == null || originalMessagesSnapshot == null) {
             return;
         }
-        originalMessagesSnapshot.add(message);
+        originalMessagesSnapshot.add(new TimedMessage(message, LocalDateTime.now()));
     }
 
     public void appendOriginalMessages(List<Message> messages) {
         if (messages == null || messages.isEmpty() || originalMessagesSnapshot == null) {
             return;
         }
-        originalMessagesSnapshot.addAll(messages);
+        LocalDateTime now = LocalDateTime.now();
+        for (Message message : messages) {
+            originalMessagesSnapshot.add(new TimedMessage(message, now));
+        }
     }
 
     /**

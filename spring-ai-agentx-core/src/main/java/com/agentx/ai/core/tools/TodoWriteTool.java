@@ -11,7 +11,7 @@ import org.springframework.ai.tool.annotation.ToolParam;
  * 任务列表管理工具，灵感来源于 Claude Code 的 TodoWrite。
  * <p>
  * 使 AI 智能体能创建、追踪和更新任务列表，将隐式规划转为显式、可观测的工作流。
- * 校验规则：同一时间只能有一个 in_progress 任务，所有任务必须有有效的 content 和 activeForm。
+ * 校验规则：所有任务必须有有效的 content、activeForm 和 status，允许多个任务并发 in_progress。
  *
  * @author Christian Tzolov (original), bigchui (adapted)
  */
@@ -38,7 +38,7 @@ public class TodoWriteTool {
 		- 单一简单任务、信息性问答、3步以内的简单操作
 
 		## 校验规则
-		- 同一时间只能有一个 in_progress 任务
+		- 允许多个任务同时处于 in_progress（并发执行子任务时）
 		- content 和 activeForm 不能为空
 		- 状态值必须是 pending、in_progress 或 completed
 
@@ -89,15 +89,6 @@ public class TodoWriteTool {
 				throw new IllegalArgumentException("索引 " + i
 						+ " 处的任务 status 为 null，状态必须是 pending、in_progress 或 completed 之一。");
 			}
-		}
-
-		long inProgressCount = todos.stream()
-				.filter(item -> item.status() == Status.in_progress)
-				.count();
-
-		if (inProgressCount > 1) {
-			throw new IllegalArgumentException("同一时间只能有一个任务处于 in_progress 状态。当前有 " + inProgressCount
-					+ " 个 in_progress 任务。请先将当前任务标记为 completed 再开始新任务。");
 		}
 	}
 

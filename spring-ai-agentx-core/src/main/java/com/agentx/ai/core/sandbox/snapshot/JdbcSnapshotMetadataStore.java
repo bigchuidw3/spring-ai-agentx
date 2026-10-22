@@ -7,7 +7,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 
 import javax.sql.DataSource;
-import java.sql.Timestamp;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.Optional;
 
@@ -36,7 +37,7 @@ public class JdbcSnapshotMetadataStore implements SnapshotMetadataStore {
                 isolation_scope VARCHAR(20)  NOT NULL                 COMMENT 'CONVERSATION 或 USER',
                 container_name  VARCHAR(300) NOT NULL                 COMMENT '容器名',
                 snapshot_size   BIGINT       DEFAULT NULL             COMMENT 'tar 文件字节数',
-                created_at      TIMESTAMP    NOT NULL                 COMMENT '创建时间',
+                created_at      TIMESTAMP(3) NOT NULL                 COMMENT '创建时间',
                 PRIMARY KEY (id),
                 UNIQUE KEY uk_scope_key (scope_key)
             ) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='AgentX 沙箱快照元数据'
@@ -95,7 +96,7 @@ public class JdbcSnapshotMetadataStore implements SnapshotMetadataStore {
                 record.isolationScope().name(),
                 record.containerName(),
                 record.snapshotSize(),
-                Timestamp.from(record.createdAt()));
+                LocalDateTime.ofInstant(record.createdAt(), ZoneId.systemDefault()));
     }
 
     @Override
@@ -116,6 +117,6 @@ public class JdbcSnapshotMetadataStore implements SnapshotMetadataStore {
             IsolationScope.valueOf(rs.getString("isolation_scope")),
             rs.getString("container_name"),
             rs.getObject("snapshot_size", Long.class),
-            rs.getTimestamp("created_at").toInstant()
+            rs.getObject("created_at", LocalDateTime.class).atZone(ZoneId.systemDefault()).toInstant()
     );
 }

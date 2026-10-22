@@ -165,6 +165,19 @@ public class AgentTaskManager {
      * @return true 如果任务存在并已触发中断
      */
     public boolean interrupt(String conversationId, String message) {
+        // 先广播中断所有子 Agent，再中断自身；master 无任务时清掉孤儿快照
+        SubAgentInterruptRegistry.interruptAll(conversationId, message);
+        boolean triggered = interruptRaw(conversationId, message);
+        if (!triggered) {
+            SubAgentInterruptRegistry.takeSnapshots(conversationId);
+        }
+        return triggered;
+    }
+
+    /**
+     * 只中断自身任务（不广播子 Agent）。供 {@link SubAgentInterruptRegistry#interruptAll} 回调使用，避免递归广播。
+     */
+    boolean interruptRaw(String conversationId, String message) {
         // 先摘除再触发中断回调：任务身份立即失效，工具完成回调据此不再调度下一轮，
         // 避免中断后同会话新执行注册导致旧执行的存活判断被误导
         TaskInfo taskInfo = taskMap.remove(conversationId);
