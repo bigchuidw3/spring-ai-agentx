@@ -46,10 +46,21 @@ public class HistoricalToolListStrategy implements CompressionStrategy {
             int[] range = ranges.get(i);
             int start = range[0];
             int end = range[1];
-            // 段不能以「含 tool_calls 的 assistant」结尾：其 tool_result 在扫描范围外，
-            // 若一并替换会导致 tool 消息孤立、破坏 tool_calls→tool 配对
-            while (end > start && isAssistantWithToolCalls(messages.get(end - 1))) {
-                end--;
+            // 段尾安全收缩：防止破坏 tool_calls→tool 配对，两种情况必须收缩：
+            // ① 段尾是 assistant(tool_calls)：其响应在段外，删除段会使段外响应变孤儿；
+            // ② 段外第一条是 tool 响应：其配对 assistant(tool_calls) 在段内
+            //    （扫描上界从 tc 与响应之间截断时发生，且一条 tc 可对应多条响应），
+            //    删除段同样会使段外响应变孤儿 → LLM 400。
+            while (end > start) {
+                if (isAssistantWithToolCalls(messages.get(end - 1))) {
+                    end--;
+                    continue;
+                }
+                if (end < messages.size() && isToolResponse(messages.get(end))) {
+                    end--;
+                    continue;
+                }
+                break;
             }
             if (end <= start) {
                 continue;
@@ -68,7 +79,9 @@ public class HistoricalToolListStrategy implements CompressionStrategy {
 
         log.info("[L1] Compressed historical tool segments: segments={}, scanEnd={}",
                 compressedSegments, scanEnd);
-        return true;
+        // 配对安全收缩可能把所有区间缩成空段（如 run 仅为单 tc+多条响应且被扫描上界截断），
+        // 此时未发生任何实际压缩，必须返回 false，否则上层会误终止策略链
+        return compressedSegments > 0;
     }
 
     private List<int[]> findConsecutiveToolRuns(List<Message> messages, int from, int to, ContextPolicy policy) {
@@ -113,6 +126,10 @@ public class HistoricalToolListStrategy implements CompressionStrategy {
             return am.getToolCalls() != null && !am.getToolCalls().isEmpty();
         }
         return false;
+    }
+
+    private boolean isToolResponse(Message msg) {
+        return msg instanceof ToolResponseMessage;
     }
 
     private boolean isAssistantWithToolCalls(Message msg) {
